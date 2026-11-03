@@ -1,0 +1,20 @@
+name: uga_terrain
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pyyaml
+  - pillow
+  - pip
+  - pip:
+      - mcap
+      - mcap-ros2-support
+      - zstandard
+      - lz4
+      - fastapi
+      - uvicorn
+      - kiss-icp
+      - pypatchworkpp
+      - pytest
+      - -e .

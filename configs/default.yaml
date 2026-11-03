@@ -1,0 +1,77 @@
+# Defaults for the UGA terrain toolkit. Settings saved in the app go to
+# configs/local.yaml (not committed) and override these.
+
+data_folders:            # where the app looks for .mcap recordings
+  - ~/Downloads/ros2support
+work_dir: ~/uga_terrain_work   # maps (projects), caches and outputs
+
+app:
+  host: 127.0.0.1
+  port: 8090
+  open_browser: true
+
+topics:
+  lidar: /lidar/points
+  navsat: /oxts/fix
+  imu: /oxts/imu
+  tf_static: /tf_static
+
+frames:
+  base: base_footprint   # vehicle frame on the ground (x forward, y left, z up)
+  lidar: lidar           # frame_id of the point cloud
+
+pose:
+  imu_convention: enu_frd   # enu_frd (OXTS driver) or enu_flu (REP-103)
+  time_source: header       # header stamps, or "log" for MCAP log time
+  gnss_offset_base: [0.0, 0.0, 0.0]   # GNSS/INS reference point in the base frame (m)
+
+lidar:
+  min_range: 2.0
+  max_range: 80.0
+  ground_max_range: 40.0     # ground farther than this is too sparse to trust
+  min_motion_m: 0.2          # skip frames until the car has moved this far
+  min_turn_deg: 2.0          # ... or turned this much
+  frame_step: 1              # use every Nth lidar frame
+  ego_box: [-1.3, 4.8, -1.2, 1.2, -0.5, 2.4]   # car body in base frame: xmin xmax ymin ymax zmin zmax
+
+odometry:
+  method: auto        # auto (KISS-ICP if installed), kiss_icp, or none (GNSS/INS only)
+  voxel: 1.0          # KISS-ICP map voxel (m)
+  fuse_sigma_s: 8.0   # how quickly GNSS pulls lidar odometry back (seconds)
+
+ground:
+  method: auto        # auto (Patchwork++ if installed), patchworkpp, or builtin
+  th_dist: 0.125      # max distance of a ground point from its local plane (m)
+  max_slope_deg: 25.0
+  voxel: 0.1          # downsample per frame before caching (m)
+
+grid:
+  cell: 0.2           # elevation map resolution (m)
+  z_bin: 0.1          # vertical bin used to reject stray points in a cell (m)
+  tile: 512           # cells per tile side
+  fill_radius: 3      # fill holes up to this many cells from data
+  window: 5           # cells in the local plane fit for slope / roughness
+  object_window_m: 8.0   # cells this much above the surface around them ...
+  object_height: 0.4     # ... (metres) are objects, not ground
+
+roads:
+  station_step: 1.0       # cross-sections every N metres along the drive
+  sample_step: 0.2        # spacing of samples across the road (m)
+  half_width: 25.0        # how far to look either side of the drive (m)
+  curb_min: 0.06          # a height step at least this big is a curb (m)
+  curb_max: 0.40
+  rough_road_max: 0.025   # RMS roughness above this is not paved road (m)
+  rough_walk_max: 0.025   # ... or sidewalk
+  walk_max_cross_slope: 0.08
+  sidewalk_min_width: 0.8
+  sidewalk_search: 8.0    # look this far past the curb for a sidewalk (m)
+  lane_width: 3.5
+  min_half_width: 1.5     # never end the road closer than this to the drive (m)
+  smooth_m: 5.0           # smoothing of widths along the road (m)
+  dedup_dist: 3.0         # a later pass this close to an existing road is not a new road
+  min_road_length: 15.0
+
+xodr:
+  segment_len: 20.0       # length of each reference-line curve piece (m)
+  profile_step: 5.0       # spacing of elevation / superelevation / width records (m)
+  relative_elevation: true   # elevations relative to the map origin (CARLA friendly)

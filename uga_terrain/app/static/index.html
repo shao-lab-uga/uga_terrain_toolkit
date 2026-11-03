@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UGA Terrain Toolkit</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{ "imports": {
+    "three": "/static/vendor/three/three.module.js",
+    "three/addons/": "/static/vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">UGA Terrain Toolkit</div>
+  <div id="job-bar" class="job idle">
+    <span id="job-text">No job running</span>
+    <div class="bar"><div id="job-fill"></div></div>
+    <button id="btn-stop" class="danger" hidden>Stop</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside>
+    <section>
+      <h2>Recordings <button id="btn-refresh" class="small" title="Look for new .mcap files">Refresh</button></h2>
+      <div id="folders" class="muted"></div>
+      <div id="rec-list" class="list"></div>
+    </section>
+    <section>
+      <h2>Maps</h2>
+      <div id="map-list" class="list"></div>
+      <div class="row">
+        <input id="new-name" placeholder="New map name">
+        <button id="btn-create" title="Make a map from the ticked recordings">Create</button>
+      </div>
+      <div class="muted">Tick recordings above, name the map, then Create. All recordings in a map are merged into one terrain.</div>
+    </section>
+    <section id="map-actions" hidden>
+      <h2 id="map-title"></h2>
+      <div id="map-recs" class="muted"></div>
+      <div class="row wrap">
+        <button id="btn-build" class="primary" title="Read the recordings and build everything">Build map</button>
+        <button id="btn-add" title="Add the ticked recordings to this map">Add ticked recordings</button>
+      </div>
+      <div class="row">
+        <label class="muted" for="rebuild-from">Re-run from</label>
+        <select id="rebuild-from">
+          <option value="map">Elevation map</option>
+          <option value="roads">Roads and sidewalks</option>
+          <option value="export">Export files</option>
+        </select>
+        <button id="btn-rebuild" title="Re-run later steps after changing Settings; skips reading the recordings again">Run</button>
+      </div>
+      <div id="map-steps" class="muted"></div>
+    </section>
+  </aside>
+
+  <main>
+    <nav class="tabs">
+      <button data-tab="map" class="active">Map</button>
+      <button data-tab="three">3D</button>
+      <button data-tab="profile">Road profile</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="log">Log</button>
+    </nav>
+
+    <section id="tab-map" class="tab active">
+      <div class="toolbar">
+        <label>Layer
+          <select id="layer">
+            <option value="labels">Surface (road / sidewalk)</option>
+            <option value="elevation">Elevation</option>
+            <option value="slope">Slope</option>
+            <option value="roughness">Roughness</option>
+            <option value="intensity">Lidar intensity</option>
+          </select></label>
+        <label><input type="checkbox" id="show-roads" checked> Roads</label>
+        <label><input type="checkbox" id="show-drives" checked> Drive path</label>
+        <button id="btn-fit" class="small">Fit</button>
+        <span id="legend" class="legend"></span>
+      </div>
+      <div class="map-wrap">
+        <canvas id="map-canvas"></canvas>
+        <div id="readout" class="readout">Move the mouse over the map</div>
+        <div id="map-empty" class="empty">Build a map to see it here.</div>
+      </div>
+    </section>
+
+    <section id="tab-three" class="tab">
+      <div class="toolbar">
+        <label>Colour
+          <select id="three-color">
+            <option value="label">Surface</option>
+            <option value="z">Elevation</option>
+          </select></label>
+        <label>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
+        <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" value="1"></label>
+        <span class="muted">Drag to rotate, right-drag to pan, scroll to zoom.</span>
+      </div>
+      <div id="three-wrap" class="three-wrap"><div id="three-msg" class="empty">Open this tab after a map is built.</div></div>
+    </section>
+
+    <section id="tab-profile" class="tab">
+      <div class="toolbar">
+        <label>Road <select id="road-select"></select></label>
+        <span id="road-info" class="muted"></span>
+      </div>
+      <div id="road-table" class="table-wrap"></div>
+      <div class="charts">
+        <div class="chart"><h3>Elevation (m)</h3><canvas id="ch-elev"></canvas></div>
+        <div class="chart"><h3>Grade (%) <span class="key lidar">lidar</span> <span class="key car">car</span></h3><canvas id="ch-grade"></canvas></div>
+        <div class="chart"><h3>Banking (deg, + = left side higher) <span class="key lidar">lidar</span> <span class="key car">car</span></h3><canvas id="ch-bank"></canvas></div>
+        <div class="chart"><h3>Widths (m) <span class="key road">road L/R</span> <span class="key walk">sidewalk L/R</span></h3><canvas id="ch-width"></canvas></div>
+        <div class="chart"><h3>Curb height (m) <span class="key lidar">left</span> <span class="key car">right</span></h3><canvas id="ch-curb"></canvas></div>
+        <div class="chart"><h3>Road roughness (m RMS)</h3><canvas id="ch-rough"></canvas></div>
+      </div>
+    </section>
+
+    <section id="tab-files" class="tab">
+      <p class="muted">Everything is also in the map's folder: <code id="out-folder"></code></p>
+      <div id="file-list" class="list files"></div>
+      <h3>What the files are</h3>
+      <ul class="muted help">
+        <li><b>.xodr</b> OpenDRIVE road network: reference line, elevation profile, banking (superelevation), driving lanes, curbs and sidewalks with their heights. Opens in CARLA, RoadRunner, esmini.</li>
+        <li><b>road_profile.csv</b> one row per metre of road: elevation, grade, banking, cross slopes, widths, curb and sidewalk sizes, roughness, and the car's own pitch/roll for comparison.</li>
+        <li><b>ground.ply</b> the merged ground surface (one point per 20 cm cell), coloured by surface type. Opens in CloudCompare, MeshLab.</li>
+        <li><b>rasters.zip</b> elevation, slope, roughness, surface label and intensity as float TIFF tiles with .tfw world files (local metres, origin in summary.json).</li>
+        <li><b>trajectory.csv</b> the car's final 3D pose for every lidar frame used.</li>
+        <li><b>summary.json</b> map origin (lat/lon/alt), areas, roads and processing details.</li>
+      </ul>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <div id="settings-form" class="settings"></div>
+      <div class="row">
+        <button id="btn-save-settings" class="primary">Save settings</button>
+        <span id="settings-msg" class="muted"></span>
+      </div>
+      <details>
+        <summary>All settings (YAML)</summary>
+        <textarea id="settings-yaml" spellcheck="false"></textarea>
+        <button id="btn-save-yaml">Save YAML</button>
+      </details>
+    </section>
+
+    <section id="tab-log" class="tab">
+      <pre id="log"></pre>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

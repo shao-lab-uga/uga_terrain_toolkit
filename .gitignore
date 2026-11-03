@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.egg-info/
+configs/local.yaml
+.pytest_cache/
+build/
+dist/
