@@ -116,7 +116,7 @@ def list_projects(cfg: dict) -> List[dict]:
 # --- step 1: scan --------------------------------------------------------------------------
 
 _SCAN_KEYS = ("topics", "frames", "pose", "lidar", "odometry", "ground")
-SCAN_VERSION = 1   # bump when scan output changes, so old caches are rebuilt
+SCAN_VERSION = 2   # bump when scan output changes, so old caches are rebuilt
 
 
 def _scan_key(path: str, cfg: dict, origin) -> str:
@@ -142,15 +142,33 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
     edges = poses.read_static_tf(path, topics.get("tf_static", "/tf_static"))
     base_f, lidar_f = frames_cfg.get("base", "base_footprint"), frames_cfg.get("lidar", "lidar")
     T_bl = np.eye(4) if base_f == lidar_f else poses.lookup(edges, base_f, lidar_f)
+    if T_bl is None and frames_cfg.get("base_to_lidar"):
+        bl = frames_cfg["base_to_lidar"]
+        T_bl = geo.make_T(geo.quat_to_mat(bl["rotation_xyzw"]), bl["translation"])
+        progress.note("%s: no %s -> %s in /tf_static; using frames.base_to_lidar from Settings"
+                      % (Path(path).name, base_f, lidar_f))
     if T_bl is None:
         raise RuntimeError(
             "%s: no static transform from %s to %s (frames found: %s). Set frames.base / "
             "frames.lidar in Settings." % (Path(path).name, base_f, lidar_f,
                                             ", ".join(sorted(edges)) or "none"))
-    fixes, imus = poses.read_gnss_imu(path, cfg)
+    fixes, imus, nav_topic = poses.read_gnss_imu(path, cfg)
     if len(fixes) == 0:
-        raise RuntimeError("%s: no GNSS fixes on %s" % (Path(path).name, topics.get("navsat")))
+        raise RuntimeError("%s: no GNSS fixes on %s" % (
+            Path(path).name, ", ".join(poses.navsat_candidates(cfg))))
+    if nav_topic != topics.get("navsat"):
+        progress.note("%s: GNSS read from %s (%s not in this recording)"
+                      % (Path(path).name, nav_topic, topics.get("navsat")))
     track = poses.build_track(fixes, imus, origin, cfg)
+    yi = getattr(track, "yaw_info", {}) or {}
+    if yi.get("source") == "measured":
+        progress.note("%s: INS heading lined up with the GNSS course: %+.1f deg "
+                      "(spread %.1f deg over %d samples)" % (Path(path).name, yi["offset_deg"],
+                                                             yi["spread_deg"], yi["samples"]))
+    elif yi.get("source") == "fallback":
+        progress.note("%s: the car never drove fast enough to check the INS heading; using "
+                      "pose.imu_yaw_offset_fallback_deg = %.1f" % (Path(path).name,
+                                                                   yi["offset_deg"]))
     seg = GroundSegmenter(cfg, T_bl[:3, 3])
     method = resolve_method(cfg)
     odo = LidarOdometry(cfg, T_bl) if method == "kiss_icp" else None
@@ -279,7 +297,7 @@ def step_scan(project: Project, cfg: dict, progress: Progress) -> List[dict]:
         if not Path(path).is_file():
             raise FileNotFoundError("recording not found: %s" % path)
         if origin is None:
-            fixes, _ = poses.read_gnss_imu(path, cfg)
+            fixes, _, _ = poses.read_gnss_imu(path, cfg)
             if len(fixes) == 0:
                 continue
             origin = list(poses.first_fix(fixes))

@@ -19,11 +19,22 @@ topics:
 frames:
   base: base_footprint   # vehicle frame on the ground (x forward, y left, z up)
   lidar: lidar           # frame_id of the point cloud
+  # Used only when a recording's /tf_static has no base -> lidar transform
+  # (lab car values, from sample.mcap).
+  base_to_lidar:
+    translation: [1.74, 0.0, 1.762]
+    rotation_xyzw: [-0.0003462424, 0.0350891189, 0.0000158232, 0.9993841272]
 
 pose:
   imu_convention: enu_frd   # enu_frd (OXTS driver) or enu_flu (REP-103)
   time_source: header       # header stamps, or "log" for MCAP log time
   gnss_offset_base: [0.0, 0.0, 0.0]   # GNSS/INS reference point in the base frame (m)
+  # Turn the INS orientation about its vertical axis so the car's nose follows
+  # the GNSS course. "auto" measures it from each recording while the car moves
+  # faster than yaw_check_min_speed; parked recordings use the fallback.
+  imu_yaw_offset_deg: auto
+  imu_yaw_offset_fallback_deg: -93.3   # measured on the lab car (clip.mcap, 2026-11-03)
+  yaw_check_min_speed: 2.0
 
 lidar:
   min_range: 2.0

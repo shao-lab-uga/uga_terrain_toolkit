@@ -16,7 +16,7 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from uga_terrain import __version__, config as config_mod, mcap_io, pipeline
+from uga_terrain import __version__, config as config_mod, mcap_io, pipeline, poses
 from uga_terrain.app.jobs import JobManager
 from uga_terrain.grid import LABELS, TerrainGrid
 from uga_terrain.ground import patchwork_available
@@ -114,7 +114,12 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         info = mcap_io.inspect(path, scan=True).to_dict()
         t = cfg().get("topics") or {}
         have = {x["topic"] for x in info["topics"]}
-        info["needed"] = {k: {"topic": v, "present": v in have} for k, v in t.items()}
+        need = {}
+        for k, v in t.items():
+            if k == "navsat":
+                v = next((c for c in poses.navsat_candidates(cfg()) if c in have), v)
+            need[k] = {"topic": v, "present": v in have}
+        info["needed"] = need
         return info
 
     # --- maps ---------------------------------------------------------------------------

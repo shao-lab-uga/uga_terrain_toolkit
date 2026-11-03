@@ -46,7 +46,10 @@ def main(argv=None) -> int:
         from uga_terrain import mcap_io
         info = mcap_io.inspect(args.file, scan=True).to_dict()
         have = {t["topic"] for t in info["topics"]}
+        from uga_terrain.poses import navsat_candidates
         for k, v in (cfg.get("topics") or {}).items():
+            if k == "navsat":
+                v = next((c for c in navsat_candidates(cfg) if c in have), v)
             print("%-10s %-24s %s" % (k, v, "ok" if v in have else "MISSING"))
         print(json.dumps(info, indent=1, default=str))
         return 0
