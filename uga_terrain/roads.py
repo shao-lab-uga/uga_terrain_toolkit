@@ -177,11 +177,19 @@ def _side(z, rough, slope, t, rc) -> dict:
     edge, kind, curb_h, j_after = n - 1, "limit", 0.0, None
     edge_z = None
     miss = 0
+    # a rough or steep patch right at the road's edge (gutter, drain grate,
+    # worn asphalt) often sits just in front of the curb: remember it and keep
+    # looking ~1 m further for a curb step before settling for it
+    pending = None
+    ahead = max(1, int(round(1.0 / dt)))
     for j in range(1, n):
+        if pending is not None and j > pending[0] + ahead:
+            break
         if not np.isfinite(z[j]):
             miss += 1
             if miss >= gap_j and j - miss + 1 >= min_j:
-                edge, kind = j - miss + 1, "gap"
+                if pending is None:
+                    edge, kind = j - miss + 1, "gap"
                 break
             continue
         miss = 0
@@ -214,16 +222,18 @@ def _side(z, rough, slope, t, rc) -> dict:
                     edge_z = float(zb)
                 edge, kind, curb_h = e, ("curb" if dz > 0 else "drop"), h
                 j_after = min(n - 1, e + q)
+                pending = None
                 break
+        if pending is not None:
+            continue
         r_win = rough[j:min(n, j + 3)]
         if len(r_win) == 3 and np.all(r_win > rough_max):
-            edge, kind = j, "rough"
-            j_after = j
-            break
-        if np.isfinite(slope[j]) and slope[j] > 15.0:
-            edge, kind = j, "slope"
-            j_after = j
-            break
+            pending = (j, "rough")
+        elif np.isfinite(slope[j]) and slope[j] > 15.0:
+            pending = (j, "slope")
+    if pending is not None:
+        edge, kind = pending
+        j_after = edge
     out = {"road_w": float(max(t[edge] - dt / 2, 0.0)), "edge": kind, "curb_h": curb_h,
            "verge_w": 0.0, "walk_w": 0.0, "walk_h": np.nan}
     if j_after is None or kind == "drop":
