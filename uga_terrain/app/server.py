@@ -78,7 +78,14 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+        # stamp the script and style URLs with their file times, so a browser
+        # never keeps running an old app.js after an update
+        html = (STATIC / "index.html").read_text()
+        for name in ("app.js", "style.css"):
+            v = int((STATIC / name).stat().st_mtime)
+            html = html.replace('/static/%s"' % name, '/static/%s?v=%d"' % (name, v))
+        html = html.replace("{{version}}", __version__)
+        return Response(html, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/state")
     def state():
@@ -361,6 +368,13 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
     @app.exception_handler(Exception)
     async def err(_req, exc):
         return JSONResponse({"detail": str(exc)}, status_code=500)
+
+    @app.middleware("http")
+    async def no_stale_static(request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith("/static/") and not request.url.path.startswith("/static/vendor/"):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

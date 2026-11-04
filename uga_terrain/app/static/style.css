@@ -14,6 +14,7 @@ body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-seri
 header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel);
          border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; color: var(--accent); white-space: nowrap; }
+.brand .ver { font-weight: 400; font-size: 11px; color: var(--muted); }
 .job { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
 .job span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .bar { flex: 0 0 220px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }

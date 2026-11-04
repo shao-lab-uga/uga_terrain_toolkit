@@ -311,7 +311,6 @@ function drawMap() {
   const layer = $("layer").value;
   const p = S.previews[layer] || S.previews.elevation;
   $("map-empty").hidden = !!p;
-  legend(p);
   if (!p) return;
   if (!S.view) fitView();
   const img = getImage(layer in S.previews ? layer : "elevation");
@@ -350,7 +349,7 @@ function drawMap() {
   mapLegend(p, layer);
 }
 function northArrow() {
-  const d = devicePixelRatio, R = 22 * d, r = 9 * d, x = 34 * d, y = 34 * d;
+  const d = devicePixelRatio, R = 26 * d, r = 12 * d, x = 38 * d, y = 38 * d;
   const ang = -S.view.rot;           // screen angle of north, clockwise from straight up
   ctx.save();
   ctx.translate(x, y);
@@ -364,9 +363,9 @@ function northArrow() {
   ctx.fillStyle = "#777";
   ctx.beginPath(); ctx.moveTo(0, r); ctx.lineTo(4.5 * d, 0); ctx.lineTo(-4.5 * d, 0); ctx.fill();
   ctx.restore();
-  ctx.fillStyle = "#222"; ctx.font = `bold ${10 * d}px system-ui`;
+  ctx.fillStyle = "#222"; ctx.font = `bold ${11 * d}px system-ui`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText("N", Math.sin(ang) * 13 * d, -Math.cos(ang) * 13 * d);
+  ctx.fillText("N", Math.sin(ang) * 17 * d, -Math.cos(ang) * 17 * d);
   ctx.restore();
 }
 function polyline(xs, ys) {
@@ -431,7 +430,17 @@ function legendBox(box, { title, ramp, lo, hi, unit, digits, asl, note }) {
 function mapLegend(p, layer) {
   const box = $("map-legend");
   const ramp = LAYER_MAP[layer];
-  if (!p || !ramp || !$("show-legend").checked) { box.hidden = true; return; }
+  if (!p || !$("show-legend").checked) { box.hidden = true; return; }
+  if (!ramp) {          // surface classes
+    box.innerHTML = "";
+    box.append(el("div", { class: "t" }, "Surface"));
+    for (const c of Object.values(p.classes || {})) {
+      box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${c.rgb.join(",")})` }), el("span", { class: "v" }, c.name)));
+    }
+    box.append(el("div", { class: "note" }, "Switch Layer to Elevation for heights."));
+    box.hidden = false;
+    return;
+  }
   const origin = S.status && S.status.origin;
   if (layer === "elevation") {
     legendBox(box, { title: "Elevation", ramp, lo: p.min, hi: p.max, unit: "m",
@@ -440,16 +449,6 @@ function mapLegend(p, layer) {
   } else if (layer === "slope") legendBox(box, { title: "Slope", ramp, lo: p.min, hi: p.max, unit: "°", digits: 0 });
   else if (layer === "roughness") legendBox(box, { title: "Roughness (RMS)", ramp, lo: 0, hi: 6, unit: "cm", digits: 1 });
   else legendBox(box, { title: "Lidar intensity", ramp, lo: p.min, hi: p.max, unit: "", digits: 0 });
-}
-function legend(p) {
-  const L = $("legend");
-  L.innerHTML = "";
-  if (!p) return;
-  if (p.classes) {
-    for (const c of Object.values(p.classes)) {
-      L.append(el("span", {}, el("span", { class: "sw", style: `background: rgb(${c.rgb.join(",")})` }), c.name));
-    }
-  }
 }
 let drag = null;
 const centreAngle = (x, y) => Math.atan2(y - cv.clientHeight / 2, x - cv.clientWidth / 2);

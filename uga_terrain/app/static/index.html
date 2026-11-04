@@ -13,7 +13,7 @@
 </head>
 <body>
 <header>
-  <div class="brand">UGA Terrain Toolkit</div>
+  <div class="brand">UGA Terrain Toolkit <span class="ver">v{{version}}</span></div>
   <div id="job-bar" class="job idle">
     <span id="job-text">No job running</span>
     <div class="bar"><div id="job-fill"></div></div>
@@ -93,7 +93,6 @@
         <label><input type="checkbox" id="show-legend" checked> Legend</label>
         <button id="btn-fit" class="small" title="Fit the map and turn north up">Fit</button>
         <span class="muted">Drag to pan, right-drag to rotate, scroll to zoom.</span>
-        <span id="legend" class="legend"></span>
       </div>
       <div class="map-wrap">
         <canvas id="map-canvas"></canvas>
