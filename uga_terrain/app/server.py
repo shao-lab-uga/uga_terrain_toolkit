@@ -55,6 +55,7 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="UGA Terrain Toolkit")
     jobs = JobManager(crash_log)
     grids: dict = {}
+    scans: dict = {}     # accuracy cross-sections: ground points of the open map
 
     def cfg():
         return config_mod.load_config()
@@ -173,6 +174,11 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             p.meta["recordings"] = recs
             p.meta["ranges"] = {k: v for k, v in (p.meta.get("ranges") or {}).items() if k in recs}
             p.save()
+        if "road_names" in body:
+            try:
+                p.set_road_names(dict(body["road_names"] or {}))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "road names must be {road id: name}")
         if "ranges" in body:
             # {recording path: {"unit", "start", "end"} or null}; a changed range
             # gets a fresh scan on the next build (the cache key includes it)
@@ -196,6 +202,21 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
                 p.mark(s_, False)
         return p.status()
 
+    @app.delete("/api/maps/{slug}")
+    def delete_map(slug: str):
+        """Delete a map's folder: outputs, scan cache and its snapshots. The
+        recordings themselves are never touched."""
+        p = project(slug)
+        j = jobs.snapshot()
+        if jobs.busy() and j and (j.get("args") or {}).get("slug") == slug:
+            raise HTTPException(409, "stop the job running on this map first")
+        grids.clear()
+        scans.clear()
+        trash = p.root.with_name(".deleting_" + p.root.name)
+        p.root.rename(trash)
+        shutil.rmtree(trash, ignore_errors=True)
+        return {"deleted": slug}
+
     @app.get("/api/maps/{slug}")
     def map_status(slug: str):
         p = project(slug)
@@ -215,8 +236,6 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             raise HTTPException(409, str(e))
 
     # --- accuracy ------------------------------------------------------------------------
-    scans: dict = {}
-
     @app.post("/api/maps/{slug}/accuracy")
     def start_accuracy(slug: str):
         p = project(slug)

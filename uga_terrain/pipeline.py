@@ -90,7 +90,24 @@ class Project:
                 "created": self.meta.get("created"), "origin": self.meta.get("origin"),
                 "ranges": [self.range_of(r) for r in self.recordings],
                 "steps": st, "built": self.meta.get("built"),
+                "road_names": self.road_names(),
                 "summary": json.loads(summary.read_text()) if summary.is_file() else None}
+
+    def road_names(self) -> Dict[int, str]:
+        """Names typed in for roads, by road id (roads without one are left out)."""
+        return {int(k): v for k, v in (self.meta.get("road_names") or {}).items() if v}
+
+    def set_road_names(self, names: dict) -> None:
+        cur = {str(k): v for k, v in (self.meta.get("road_names") or {}).items()}
+        for k, v in names.items():
+            v = " ".join(str(v or "").split())[:80]
+            if v:
+                cur[str(int(k))] = v
+            else:
+                cur.pop(str(int(k)), None)
+        self.meta["road_names"] = cur
+        self.save()
+        apply_road_names(self)
 
     def range_of(self, recording: str) -> Optional[dict]:
         return (self.meta.get("ranges") or {}).get(str(recording))
@@ -109,7 +126,7 @@ def list_projects(cfg: dict) -> List[dict]:
         return []
     out = []
     for d in sorted(root.iterdir()):
-        if (d / "project.json").is_file():
+        if not d.name.startswith(".") and (d / "project.json").is_file():
             try:
                 out.append(Project(d).status())
             except (OSError, ValueError):
@@ -504,7 +521,8 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     origin = tuple(project.meta.get("origin") or (0.0, 0.0, 0.0))
     progress.set("export", 0, 5, "OpenDRIVE")
     name = _slug(project.name)
-    xinfo = xodr.write_xodr(found, origin, cfg, out / ("%s.xodr" % name), name=name)
+    names = project.road_names()
+    xinfo = xodr.write_xodr(found, origin, cfg, out / ("%s.xodr" % name), name=name, road_names=names)
     progress.set("export", 1, 5, "road profile CSV")
     export.write_profile_csv(found, out / "road_profile.csv")
     rows = []
@@ -539,7 +557,7 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     summary = {
         "name": project.name, "origin_lla": origin, "cell_m": grid.cell,
         "bounds": grid.bounds(), "terrain": stats, "roads": xinfo,
-        "road_list": [{"id": r.id, "source": r.source, "length_m": round(r.length, 1),
+        "road_list": [{"id": r.id, "name": names.get(r.id), "source": r.source, "length_m": round(r.length, 1),
                        "mean_grade_pct": _nanmean(r.data.get("grade_pct")),
                        "max_abs_grade_pct": _nanmax_abs(r.data.get("grade_pct")),
                        "mean_bank_deg": _nanmean(r.data.get("bank_deg")),
@@ -554,6 +572,27 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     export.save_json(summary, out / "summary.json")
     progress.set("export", 5, 5, "done")
     return summary
+
+
+def apply_road_names(project: Project) -> None:
+    """Put the current road names into an already exported .xodr and summary.json,
+    so renaming a road does not need a rebuild."""
+    names = project.road_names()
+    out = project.out
+    sj = out / "summary.json"
+    if sj.is_file():
+        summary = json.loads(sj.read_text())
+        for r in summary.get("road_list") or []:
+            r["name"] = names.get(r["id"])
+        export.save_json(summary, sj)
+    xf = out / ("%s.xodr" % _slug(project.name))
+    if xf.is_file():
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(xf)
+        for r in tree.getroot().findall("road"):
+            rid = int(r.get("id"))
+            r.set("name", names.get(rid) or "road_%d" % rid)
+        tree.write(xf, encoding="utf-8", xml_declaration=True)
 
 
 def _nanmean(v):

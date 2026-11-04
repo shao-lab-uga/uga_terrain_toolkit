@@ -121,3 +121,4 @@ code { font-size: 12px; }
 .range-form .row { gap: 4px; font-size: 12px; }
 tr.warn td { color: var(--warn); font-weight: 600; }
 #tab-accuracy h4 { margin: 12px 0 4px; }
+.danger-zone { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); }

@@ -9,6 +9,7 @@ const S = {
 };
 
 // --- helpers ---------------------------------------------------------------------
+const roadName = (id) => (S.status && S.status.road_names && S.status.road_names[id]) || `Road ${id}`;
 async function api(path, opts = {}) {
   const o = Object.assign({ headers: {} }, opts);
   if (o.body && typeof o.body !== "string") {
@@ -272,6 +273,19 @@ async function startBuild(start) {
   pollJob();
 }
 
+$("btn-delete-map").addEventListener("click", guard(async () => {
+  const name = S.status ? S.status.name : S.map;
+  const n = $("snap-list").querySelectorAll(".item").length;
+  if (!confirm(`Delete the map "${name}"?\n\nIts outputs, scan cache` + (n ? ` and ${n} snapshot(s)` : "") +
+    ` are deleted for good. Your .mcap recordings are not touched.\n\nUse Export map first if you may want it back.`)) return;
+  await api(`/api/maps/${S.map}`, { method: "DELETE" });
+  S.map = null; S.status = null;
+  $("map-actions").hidden = true;
+  await loadResults();
+  await loadMaps(false);
+  toast(`Deleted "${name}".`);
+}));
+
 // --- job -----------------------------------------------------------------------------
 let polling = false;
 async function pollJob() {
@@ -396,9 +410,11 @@ function drawMap() {
       polyline(r.x, r.y);
       const m = Math.floor(r.x.length / 2);
       const [px, py] = toPx(r.x[m], r.y[m]);
+      ctx.font = `600 ${12 * devicePixelRatio}px system-ui`;
+      ctx.lineWidth = 3 * devicePixelRatio; ctx.strokeStyle = "rgba(255,255,255,.9)";
+      ctx.strokeText(roadName(r.id), px + 6, py - 6);
       ctx.fillStyle = "#b5121b";
-      ctx.font = `${12 * devicePixelRatio}px system-ui`;
-      ctx.fillText("road " + r.id, px + 6, py - 6);
+      ctx.fillText(roadName(r.id), px + 6, py - 6);
     }
   }
   scaleBar();
@@ -569,7 +585,7 @@ function pickRoad(px, py) {
       if (d < bd) { bd = d; best = r.id; }
     }
   }
-  if (best !== null) { S.road = best; $("road-select").value = best; drawMap(); drawProfile(); toast(`Road ${best} selected; see the Road profile tab.`); }
+  if (best !== null) { S.road = best; $("road-select").value = best; drawMap(); drawProfile(); toast(`${roadName(best)} selected; see the Road profile tab.`); }
 }
 ["layer", "show-roads", "show-drives", "show-legend"].forEach((id) => $(id).addEventListener("change", drawMap));
 $("btn-fit").addEventListener("click", () => { S.view = null; drawMap(); });
@@ -579,8 +595,10 @@ window.addEventListener("resize", () => { drawMap(); drawProfile(); if (S.three)
 function fillRoadSelect() {
   const s = $("road-select");
   s.innerHTML = "";
-  for (const r of S.roads) s.append(el("option", { value: r.id }, `Road ${r.id} (${r.length.toFixed(0)} m)`));
+  for (const r of S.roads) s.append(el("option", { value: r.id }, `${roadName(r.id)} (${r.length.toFixed(0)} m)`));
   if (S.road !== null) s.value = S.road;
+  $("road-name").value = S.road !== null && S.status && S.status.road_names && S.status.road_names[S.road] || "";
+  $("road-name").disabled = $("btn-road-name").disabled = S.road === null;
   const T = $("road-table");
   T.innerHTML = "";
   const list = (S.summary && S.summary.road_list) || [];
@@ -589,12 +607,23 @@ function fillRoadSelect() {
   tbl.append(el("tr", {}, ...["Road", "Length m", "Mean grade %", "Max |grade| %", "Mean bank °", "Max |bank| °", "Width m", "Sidewalk L %", "Sidewalk R %"].map((h) => el("th", {}, h))));
   for (const r of list) {
     const tr = el("tr", { class: r.id === S.road ? "sel" : "", onclick: () => { S.road = r.id; s.value = r.id; fillRoadSelect(); drawProfile(); drawMap(); } },
-      ...[r.id, fmt(r.length_m, 0), fmt(r.mean_grade_pct, 2), fmt(r.max_abs_grade_pct, 1), fmt(r.mean_bank_deg, 2),
+      ...[roadName(r.id), fmt(r.length_m, 0), fmt(r.mean_grade_pct, 2), fmt(r.max_abs_grade_pct, 1), fmt(r.mean_bank_deg, 2),
         fmt(r.max_abs_bank_deg, 1), fmt(r.median_width_m, 1), fmt(r.sidewalk_left_pct, 0), fmt(r.sidewalk_right_pct, 0)].map((v) => el("td", {}, v)));
     tbl.append(tr);
   }
   T.append(tbl);
 }
+async function saveRoadName() {
+  if (S.road === null) return;
+  const name = $("road-name").value.trim();
+  const st = await api(`/api/maps/${S.map}`, { method: "PUT", body: { road_names: { [S.road]: name } } });
+  S.status.road_names = st.road_names;
+  if (S.summary) for (const r of S.summary.road_list || []) r.name = st.road_names[r.id] || null;
+  fillRoadSelect(); drawMap();
+  toast(name ? `Road ${S.road} is now "${name}". The .xodr has been updated.` : `Name removed from road ${S.road}.`);
+}
+$("btn-road-name").addEventListener("click", guard(saveRoadName));
+$("road-name").addEventListener("keydown", (e) => { if (e.key === "Enter") guard(saveRoadName)(); });
 $("road-select").addEventListener("change", () => { S.road = Number($("road-select").value); fillRoadSelect(); drawProfile(); drawMap(); });
 
 function chart(id, s, series, opts = {}) {
@@ -698,14 +727,14 @@ async function loadAccuracy() {
         const f = (v) => v === null ? "–" : row.unit === "m" ? (row.key.startsWith("curb") ? cm(v) : v.toFixed(2) + " m") : v.toFixed(2) + (row.unit === "%" ? " %" : "°");
         t.append(el("tr", {}, ...[row.label, f(row.value), row.found_pct.toFixed(0) + " % of stations", row.repeat === null ? "–" : "± " + f(row.repeat)].map((v) => el("td", {}, v))));
       }
-      B.append(el("h4", {}, `Road ${r.id} (${r.length_m.toFixed(0)} m)`), el("div", { class: "table-wrap" }, t));
+      B.append(el("h4", {}, `${roadName(r.id)} (${r.length_m.toFixed(0)} m)`), el("div", { class: "table-wrap" }, t));
     }
   }
   // cross-section controls
   const sel = $("sec-road");
   const keep = Number(sel.value);
   sel.innerHTML = "";
-  for (const r of S.roads) sel.append(el("option", { value: r.id }, `Road ${r.id}`));
+  for (const r of S.roads) sel.append(el("option", { value: r.id }, roadName(r.id)));
   if (S.roads.some((r) => r.id === keep)) sel.value = keep;
   setSectionRange();
   await loadSection();

@@ -40,6 +40,10 @@ Your browser opens at http://127.0.0.1:8090. Then:
    - **Files**: download the outputs.
 5. After changing Settings, use **Re-run from** to redo later steps without reading the recordings again.
 
+To name a street, pick it in **Road profile** (or click it on the map), type a name and press **Save name**. The name is shown on the map and written into the .xodr straight away.
+
+To delete a map, select it and press **Delete map** at the bottom of the left panel. This deletes its outputs, scan cache and snapshots, but never the recordings. Use **Export map** first if you may want it back.
+
 To merge more drives into an existing map, tick them and press **Add ticked recordings**, then **Build map**.
 
 **Mapping only part of a recording:** press **Part…** next to a recording in the map's panel. Enter a start and end in seconds (from the first lidar scan) or in lidar frame numbers, press **Use this part**, then **Build map**. Leave a box empty to mean the start or end of the recording. To map less of the surroundings, lower **Settings → Max ground range** (for example 15 m).

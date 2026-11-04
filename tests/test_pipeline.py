@@ -33,6 +33,12 @@ def test_build_from_mcap(tmp_path, monkeypatch):
     sec = accuracy.section(p, road, float(road.s[len(road.s) // 2]), xyz, scan)
     assert len(sec["lat"]) == len(sec["dz"]) == len(sec["scan"]) > 50
 
+    # naming a road updates the exported .xodr without a rebuild
+    p.set_road_names({road.id: "Main  St "})
+    names = [r.get("name") for r in ET.parse(p.out / "sim.xodr").getroot().findall("road")]
+    assert "Main St" in names
+    assert pipeline.Project(p.root).road_names() == {road.id: "Main St"}
+
 
 def test_build_part_of_recording(tmp_path, monkeypatch):
     monkeypatch.setenv("UGA_TERRAIN_WORK_DIR", str(tmp_path / "work"))

@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 import xml.etree.ElementTree as ET
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -144,7 +144,7 @@ def _present(v: np.ndarray, frac: float = 0.3) -> bool:
     return bool(np.mean(np.nan_to_num(v) > 0) >= frac)
 
 
-def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0):
+def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = ""):
     xc = cfg.get("xodr") or {}
     rc = cfg.get("roads") or {}
     seg = float(xc.get("segment_len") or 20.0)
@@ -160,7 +160,7 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0):
     def at(name, fill=0.0):
         return np.interp(knots, s_st, _clean(d[name], fill))
 
-    r = ET.SubElement(root, "road", name="road_%d" % road.id, length=_f(Lg),
+    r = ET.SubElement(root, "road", name=road_name or "road_%d" % road.id, length=_f(Lg),
                       id=str(road.id), junction="-1")
     ET.SubElement(r, "link")
     ET.SubElement(r, "type", s="0", type="town")
@@ -233,7 +233,7 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0):
 
 
 def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cfg: dict,
-               path, name: str = "uga_terrain") -> dict:
+               path, name: str = "uga_terrain", road_names: Optional[dict] = None) -> dict:
     xc = cfg.get("xodr") or {}
     z_off = 0.0 if xc.get("relative_elevation", True) else float(origin_lla[2])
     root = ET.Element("OpenDRIVE")
@@ -249,7 +249,7 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
                 "+units=m +no_defs" % (origin_lla[0], origin_lla[1]))
     ET.SubElement(hdr, "userData", code="origin_altitude_m", value=_f(origin_lla[2]))
     for road in roads:
-        road_element(root, road, cfg, z_off)
+        road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""))
     ET.indent(root, space="  ")
     xml = ET.tostring(root, encoding="unicode")
     xml = xml.replace("<geoReference>+proj", "<geoReference><![CDATA[+proj").replace(

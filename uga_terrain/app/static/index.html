@@ -65,6 +65,9 @@
         <label class="muted" title="Bigger file, but the map can be rebuilt from Elevation map onwards without the recordings"><input type="checkbox" id="export-cache"> with scan cache</label>
       </div>
       <div id="snap-list" class="list"></div>
+      <div class="row danger-zone">
+        <button id="btn-delete-map" class="danger" title="Delete this map, its outputs and its snapshots. Your recordings are not touched.">Delete map</button>
+      </div>
     </section>
   </aside>
 
@@ -126,6 +129,8 @@
     <section id="tab-profile" class="tab">
       <div class="toolbar">
         <label>Road <select id="road-select"></select></label>
+        <label>Name <input id="road-name" type="text" placeholder="e.g. Baxter St" maxlength="80" style="width: 180px"></label>
+        <button id="btn-road-name" title="Shown on the map and written into the .xodr">Save name</button>
         <span id="road-info" class="muted"></span>
       </div>
       <div id="road-table" class="table-wrap"></div>
