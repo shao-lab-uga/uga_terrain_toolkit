@@ -1114,6 +1114,20 @@ $("btn-save-yaml").addEventListener("click", guard(async () => {
   await loadSettings(); await loadRecordings();
 }));
 
+// --- stay on the running version ---------------------------------------------------------
+// A tab left open from an earlier run keeps showing the old app even after the
+// app is updated and restarted. Check the running version now and then and
+// reload when it has changed.
+const PAGE_VERSION = (document.querySelector(".ver") || { textContent: "" }).textContent.replace(/^v/, "").trim();
+setInterval(async () => {
+  if (S.job && S.job.state === "running") return;
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    const v = (await r.json()).version;
+    if (v && PAGE_VERSION && v !== PAGE_VERSION) location.replace("/?v=" + encodeURIComponent(v));
+  } catch (e) { /* app not running right now */ }
+}, 5000);
+
 // --- start -------------------------------------------------------------------------------
 (guard(async () => {
   const st = await api("/api/state");

@@ -40,7 +40,11 @@ def main(argv=None) -> int:
         if not getattr(args, "no_browser", False) and app_cfg.get("open_browser", True):
             import threading
             import webbrowser
-            threading.Timer(1.5, webbrowser.open, ("http://%s:%d" % (host, port),)).start()
+            # the version in the address makes the browser open a fresh tab of this
+            # version rather than switch to an old tab left open from an earlier run
+            from uga_terrain import __version__
+            url = "http://%s:%d/?v=%s" % (host, port, __version__)
+            threading.Timer(1.5, webbrowser.open_new_tab, (url,)).start()
         serve(host, port)
         return 0
 
