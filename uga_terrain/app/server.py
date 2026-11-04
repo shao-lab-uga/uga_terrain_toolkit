@@ -97,6 +97,18 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
                 "crash_log": crash_log, "job": jobs.snapshot()}
 
     # --- settings ---------------------------------------------------------------------
+    @app.post("/api/quit")
+    def quit_app(request: Request):
+        """Lets a newly started copy of the app replace this one (local only)."""
+        if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(403, "only from this computer")
+        if jobs.busy():
+            raise HTTPException(409, "a job is running")
+        import signal
+        import threading
+        threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)).start()
+        return {"quitting": True}
+
     @app.get("/api/settings")
     def get_settings():
         c = cfg()

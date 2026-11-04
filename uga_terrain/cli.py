@@ -35,6 +35,8 @@ def main(argv=None) -> int:
         app_cfg = cfg.get("app") or {}
         host = getattr(args, "host", None) or app_cfg.get("host", "127.0.0.1")
         port = getattr(args, "port", None) or int(app_cfg.get("port", 8090))
+        from uga_terrain.app.launch import claim_port
+        port = claim_port(host, port)
         if not getattr(args, "no_browser", False) and app_cfg.get("open_browser", True):
             import threading
             import webbrowser

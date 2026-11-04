@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uga-terrain-toolkit"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Drivable and walkable terrain maps (elevation, banking, roughness, curbs, sidewalks) and OpenDRIVE from ROS 2 lidar recordings"
 requires-python = ">=3.9"
 dependencies = [
@@ -25,6 +25,9 @@ test = ["pytest"]
 
 [project.scripts]
 uga-terrain = "uga_terrain.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "uga_terrain.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["uga_terrain*"]

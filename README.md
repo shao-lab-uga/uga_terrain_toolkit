@@ -27,7 +27,7 @@ cd uga_terrain_toolkit
 python -m uga_terrain app        # or: scripts/run_app.sh
 ```
 
-Your browser opens at http://127.0.0.1:8090. Then:
+Your browser opens at http://127.0.0.1:8090. If an older copy of the app is still running (from another terminal, say), it is stopped first, so you always get the version you just pulled. If the port is held by something else, the app moves to the next free port and prints it. Then:
 
 1. **Settings** → set *Recording folders*. The default is `~/Downloads/ros2support`. Any `.mcap` files inside, including sub-folders, appear on the left.
 2. Tick one or more recordings, type a map name, and press **Create**.
