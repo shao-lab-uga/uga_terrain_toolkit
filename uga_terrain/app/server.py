@@ -214,6 +214,44 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(409, str(e))
 
+    # --- accuracy ------------------------------------------------------------------------
+    scans: dict = {}
+
+    @app.post("/api/maps/{slug}/accuracy")
+    def start_accuracy(slug: str):
+        p = project(slug)
+        if not (p.root / "grid" / "grid.json").is_file():
+            raise HTTPException(400, "build the map first")
+        try:
+            return jobs.start("accuracy", cfg(), {"name": p.name, "slug": slug})
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+
+    @app.get("/api/maps/{slug}/accuracy")
+    def get_accuracy(slug: str):
+        f = project(slug).root / "accuracy.json"
+        return Response(f.read_text() if f.is_file() else "null", media_type="application/json")
+
+    @app.get("/api/maps/{slug}/section")
+    def road_section(slug: str, road: int, s: float, half_width: float = Query(15.0, ge=2, le=40)):
+        """Raw ground points of every scan in a thin slice across a road."""
+        from uga_terrain import accuracy
+        p = project(slug)
+        rd = [r for r in pipeline.load_roads(p) if r.id == road]
+        if not rd:
+            raise HTTPException(404, "no road %d" % road)
+        fz = [p.cache(i) / "frames.npz" for i in range(len(p.recordings))]
+        key = (str(p.root),) + tuple(f.stat().st_mtime if f.is_file() else 0 for f in fz)
+        if key not in scans:
+            scans.clear()
+            try:
+                xyz, _rng, scan, _rec = accuracy.load_scans(p)
+            except RuntimeError as e:
+                raise HTTPException(400, str(e))
+            scans[key] = (xyz.astype(np.float32), scan)
+        xyz, scan = scans[key]
+        return accuracy.section(p, rd[0], s, xyz, scan, half_width=half_width)
+
     @app.get("/api/job")
     def job():
         return {"job": jobs.snapshot()}

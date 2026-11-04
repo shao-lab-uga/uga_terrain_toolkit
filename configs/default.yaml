@@ -43,6 +43,7 @@ lidar:
   min_motion_m: 0.2          # skip frames until the car has moved this far
   min_turn_deg: 2.0          # ... or turned this much
   frame_step: 1              # use every Nth lidar frame
+  deskew: true               # correct each scan for the car's motion while the lidar spins
   ego_box: [-1.3, 4.8, -1.2, 1.2, -0.5, 2.4]   # car body in base frame: xmin xmax ymin ymax zmin zmax
 
 odometry:

@@ -8,8 +8,15 @@ import numpy as np
 _DT = {1: "i1", 2: "u1", 3: "i2", 4: "u2", 5: "i4", 6: "u4", 7: "f4", 8: "f8"}
 
 
-def decode_pointcloud2(msg) -> np.ndarray:
-    """Return (N, 4) float32 x, y, z, intensity (intensity 0 when absent)."""
+_TIME_FIELDS = ("t", "time", "timestamp", "offset_time")
+
+
+def decode_pointcloud2(msg, with_time: bool = False) -> np.ndarray:
+    """Return (N, 4) float32 x, y, z, intensity (intensity 0 when absent).
+
+    With ``with_time``, a 5th column holds each point's time within the sweep in
+    seconds (Ouster ``t`` in ns, or a float field in seconds), or NaN when the
+    cloud has no per-point time."""
     end = ">" if getattr(msg, "is_bigendian", False) else "<"
     names, formats, offsets = [], [], []
     for f in msg.fields:
@@ -22,13 +29,25 @@ def decode_pointcloud2(msg) -> np.ndarray:
                    "itemsize": step})
     n = int(msg.width) * int(msg.height)
     raw = np.frombuffer(bytes(msg.data), dtype=dt, count=n)
-    out = np.zeros((n, 4), dtype=np.float32)
+    out = np.zeros((n, 5 if with_time else 4), dtype=np.float32)
     for k, name in enumerate(("x", "y", "z")):
         out[:, k] = raw[name]
     for name in ("intensity", "reflectivity", "i"):
         if name in names:
             out[:, 3] = raw[name]
             break
+    if with_time:
+        out[:, 4] = np.nan
+        for name in _TIME_FIELDS:
+            if name in names:
+                v = raw[name]
+                if np.issubdtype(v.dtype, np.integer):
+                    out[:, 4] = v.astype(np.float64) * 1e-9      # nanoseconds
+                else:
+                    out[:, 4] = v
+                    if np.nanmax(np.abs(out[:, 4])) > 10:       # absolute stamps
+                        out[:, 4] -= np.nanmin(out[:, 4])
+                break
     return out
 
 

@@ -56,6 +56,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   if (b.dataset.tab === "three") guard(open3D)();
   if (b.dataset.tab === "profile") drawProfile();
   if (b.dataset.tab === "settings") guard(loadSettings)();
+  if (b.dataset.tab === "accuracy") guard(loadAccuracy)();
 }));
 
 // --- recordings --------------------------------------------------------------------
@@ -234,7 +235,9 @@ async function loadResults() {
     if (S.roads.length) S.road = S.roads[0].id;
   }
   S.view = null;
+  S.acc = null; S.section = null;
   fillRoadSelect();
+  if ($("tab-accuracy").classList.contains("active")) await loadAccuracy();
   await loadFiles();
   drawMap();
   drawProfile();
@@ -291,7 +294,7 @@ async function pollJob() {
 function showJob(j) {
   const bar = $("job-bar");
   $("btn-stop").hidden = !(j && j.state === "running");
-  ["btn-build", "btn-rebuild", "btn-add", "btn-snapshot", "btn-import"].forEach((id) => ($(id).disabled = !!(j && j.state === "running")));
+  ["btn-build", "btn-rebuild", "btn-add", "btn-snapshot", "btn-import", "btn-accuracy"].forEach((id) => ($(id).disabled = !!(j && j.state === "running")));
   if (!j) { bar.className = "job idle"; $("job-text").textContent = "No job running"; return; }
   const pct = Math.round(100 * j.done / Math.max(j.total, 1));
   $("job-fill").style.width = pct + "%";
@@ -306,6 +309,13 @@ function showJob(j) {
   $("log").textContent = (j.log || []).join("\n");
 }
 async function jobFinished(j) {
+  if (j.kind === "accuracy") {
+    if (j.state === "done") toast("Accuracy check finished.");
+    else if (j.state === "error") toast("The accuracy check failed: " + j.error, true);
+    S.acc = null;
+    await loadAccuracy();
+    return;
+  }
   if (j.state === "done") toast("Map built.");
   else if (j.state === "error") toast("The build failed: " + j.error, true);
   await loadMaps();
@@ -645,6 +655,172 @@ function drawProfile() {
   chart("ch-rough", r.s, [{ v: r.roughness, c: "#2b6cb0" }], { zero: true, minSpan: 0.01 });
 }
 
+// --- accuracy ---------------------------------------------------------------------------
+const cm = (v, d = 1) => (v === null || v === undefined) ? "–" : (100 * v).toFixed(d) + " cm";
+async function loadAccuracy() {
+  const B = $("acc-body");
+  B.innerHTML = "";
+  if (!S.map || !S.summary) { B.append(el("p", { class: "muted" }, "Build a map first.")); return; }
+  if (!S.acc) S.acc = await api(`/api/maps/${S.map}/accuracy`);
+  const a = S.acc;
+  if (!a) {
+    $("acc-when").textContent = "Not checked yet. It takes about as long as reading the scans (seconds to a few minutes).";
+  } else {
+    $("acc-when").textContent = `Checked ${a.checked} on ${a.scans} scans, ${(a.points / 1e6).toFixed(1)} M ground points.`;
+    B.append(el("h3", {}, "Findings"), el("ul", { class: "help" }, ...a.verdict.map((v) => el("li", {}, v))));
+    // poses
+    const tp = el("table");
+    tp.append(el("tr", {}, ...["Recording", "Scans", "Lidar odometry", "Scans where lidar disagreed with GNSS/INS", "Final path vs GNSS (median / max)", "Motion corrected"].map((h) => el("th", {}, h))));
+    for (const p of a.poses) {
+      const g = p.gnss_vs_final_m || {};
+      tp.append(el("tr", {}, ...[p.recording + (p.range ? " (part)" : ""), p.frames ?? "–", p.odometry || "–", p.odometry_resets ?? "–",
+        g.median != null ? `${cm(g.median, 0)} / ${cm(g.max, 0)}` : "–", p.deskewed ? "yes" : "no"].map((v) => el("td", {}, v))));
+    }
+    B.append(el("h3", {}, "Drive path"), el("div", { class: "table-wrap" }, tp));
+    // by range
+    const tr = el("table");
+    tr.append(el("tr", {}, ...["Distance from car", "Points", "Bias (+ = too high)", "Typical error", "90 % within"].map((h) => el("th", {}, h))));
+    for (const r of a.by_range) {
+      const bad = r.from_m >= 10 && (Math.abs(r.bias_m) > 0.02 || r.typical_m > 0.03);
+      tr.append(el("tr", { class: bad ? "warn" : "" }, ...[`${r.from_m}–${r.to_m} m`, r.points.toLocaleString(), cm(r.bias_m), cm(r.typical_m), cm(r.p90_m)].map((v) => el("td", {}, v))));
+    }
+    B.append(el("h3", {}, "Ground height error by distance from the car"),
+      el("p", { class: "muted help" }, "Each point's height compared with the same 20 cm cell seen from less than 12 m away, where the lidar is most precise."),
+      el("div", { class: "table-wrap" }, tr));
+    // halves
+    const h = a.halves || {};
+    B.append(el("h3", {}, "Repeatability"),
+      el("p", { class: "help" }, `Two maps, one from the first half of the scans and one from the second, differ by ${cm(h.road_typical_m ?? h.typical_m)} on roads and sidewalks (90 % within ${cm(h.road_p90_m ?? h.p90_m)}), over ${(h.cells || 0).toLocaleString()} cells both halves see. Their overall offset is ${cm(h.offset_m)}.`));
+    for (const r of a.roads || []) {
+      const t = el("table");
+      t.append(el("tr", {}, ...["Measurement", "Value (median)", "Found at", "Half vs half difference"].map((x) => el("th", {}, x))));
+      for (const row of r.rows) {
+        const f = (v) => v === null ? "–" : row.unit === "m" ? (row.key.startsWith("curb") ? cm(v) : v.toFixed(2) + " m") : v.toFixed(2) + (row.unit === "%" ? " %" : "°");
+        t.append(el("tr", {}, ...[row.label, f(row.value), row.found_pct.toFixed(0) + " % of stations", row.repeat === null ? "–" : "± " + f(row.repeat)].map((v) => el("td", {}, v))));
+      }
+      B.append(el("h4", {}, `Road ${r.id} (${r.length_m.toFixed(0)} m)`), el("div", { class: "table-wrap" }, t));
+    }
+  }
+  // cross-section controls
+  const sel = $("sec-road");
+  const keep = Number(sel.value);
+  sel.innerHTML = "";
+  for (const r of S.roads) sel.append(el("option", { value: r.id }, `Road ${r.id}`));
+  if (S.roads.some((r) => r.id === keep)) sel.value = keep;
+  setSectionRange();
+  await loadSection();
+}
+function setSectionRange() {
+  const r = S.roads.find((x) => x.id === Number($("sec-road").value));
+  const sl = $("sec-s");
+  if (!r) { sl.disabled = true; return; }
+  sl.disabled = false;
+  sl.min = Math.floor(r.s[0]); sl.max = Math.floor(r.s[r.s.length - 1]);
+  if (Number(sl.value) < Number(sl.min) || Number(sl.value) > Number(sl.max)) sl.value = Math.round((Number(sl.min) + Number(sl.max)) / 2);
+}
+async function loadSection() {
+  const road = Number($("sec-road").value), s = Number($("sec-s").value);
+  $("sec-s-text").textContent = `${s} m along the road`;
+  if (!S.roads.length) { S.section = null; drawSection(); return; }
+  const req = (loadSection._n = (loadSection._n || 0) + 1);
+  $("sec-info").textContent = "Loading the scans ...";
+  const d = await api(`/api/maps/${S.map}/section?road=${road}&s=${s}`);
+  if (req !== loadSection._n) return;      // a newer request is on its way
+  S.section = d;
+  drawSection();
+}
+$("sec-road").addEventListener("change", guard(async () => { setSectionRange(); await loadSection(); }));
+$("sec-s").addEventListener("input", () => { $("sec-s-text").textContent = `${$("sec-s").value} m along the road`; clearTimeout(loadSection._t); loadSection._t = setTimeout(guard(loadSection), 150); });
+$("sec-zoom").addEventListener("change", () => drawSection());
+$("btn-accuracy").addEventListener("click", guard(async () => {
+  S.job = await api(`/api/maps/${S.map}/accuracy`, { method: "POST" });
+  S.acc = null;
+  pollJob();
+}));
+window.addEventListener("resize", () => { if ($("tab-accuracy").classList.contains("active")) drawSection(); });
+
+function drawSection() {
+  const c = $("sec-canvas");
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w) return;
+  c.width = w * devicePixelRatio; c.height = h * devicePixelRatio;
+  const g = c.getContext("2d");
+  g.scale(devicePixelRatio, devicePixelRatio);
+  g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.body);
+  const muted = css.getPropertyValue("--muted"), line = css.getPropertyValue("--line");
+  g.font = "11px system-ui";
+  const d = S.section;
+  if (!d || !d.lat.length) { g.fillStyle = muted; g.fillText(d ? "No lidar points here." : "Pick a road.", 10, 20); $("sec-info").textContent = ""; return; }
+  const L = 52, R = 10, T = 22, Bm = 22;
+  const hw = Math.max(...d.lat.map(Math.abs), 5);
+  const pxm = (w - L - R) / (2 * hw);
+  const zoom = Number($("sec-zoom").value);
+  const pzm = pxm * zoom;
+  const dzs = d.dz.slice().sort((a, b) => a - b);
+  const mid = dzs[Math.floor(dzs.length / 2)];
+  const X = (lat) => L + (hw - lat) * pxm;        // looking along the drive: left side on the left
+  const Y = (dz) => T + (h - T - Bm) / 2 - (dz - mid) * pzm;
+  // grid: height lines
+  const span = (h - T - Bm) / pzm;
+  const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5].find((s) => span / s <= 8) || 10;
+  g.strokeStyle = line; g.fillStyle = muted; g.lineWidth = 1;
+  for (let v = Math.ceil((mid - span / 2) / step) * step; v <= mid + span / 2; v += step) {
+    const y = Y(v);
+    g.beginPath(); g.moveTo(L, y); g.lineTo(w - R, y); g.stroke();
+    g.fillText((step < 0.1 ? (100 * v).toFixed(0) + " cm" : v.toFixed(1) + " m"), 2, y + 4);
+  }
+  for (let v = -Math.floor(hw / 5) * 5; v <= hw; v += 5) {
+    g.fillText(v === 0 ? "path" : `${Math.abs(v)} m ${v > 0 ? "L" : "R"}`, X(v) - 12, h - 6);
+  }
+  // points, coloured by scan
+  const n = Math.max(d.scans - 1, 1);
+  for (let i = 0; i < d.lat.length; i++) {
+    g.fillStyle = `hsl(${(250 * d.scan[i] / n).toFixed(0)}, 80%, 50%)`;
+    g.fillRect(X(d.lat[i]) - 1, Y(d.dz[i]) - 1, 2, 2);
+  }
+  // measured edges
+  const ed = d.edges;
+  g.lineWidth = 1.5;
+  for (const [side, sg] of [["l", 1], ["r", -1]]) {
+    const e = ed[side];
+    if (e.road == null) continue;
+    const xr = X(sg * e.road);
+    g.strokeStyle = "#e53e3e"; g.setLineDash([4, 3]);
+    g.beginPath(); g.moveTo(xr, T); g.lineTo(xr, h - Bm); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = "#e53e3e";
+    const lab = (e.edge || "edge") + (e.curb_h ? ` ${(100 * e.curb_h).toFixed(0)} cm` : "");
+    g.fillText(lab, xr + (sg > 0 ? 4 : -4 - g.measureText(lab).width), T - 8);
+    if (e.walk) {
+      const a = sg * (e.road + (e.verge || 0)), b = sg * (e.road + (e.verge || 0) + e.walk);
+      g.fillStyle = "rgba(214, 158, 46, 0.35)";
+      g.fillRect(Math.min(X(a), X(b)), T - 4, Math.abs(X(b) - X(a)), 6);
+    }
+  }
+  // spread of the scans on the road: median distance of each point from its 20 cm column's median
+  const cols = new Map();
+  for (let i = 0; i < d.lat.length; i++) {
+    const inRoad = (d.lat[i] >= 0 && d.lat[i] < (ed.l.road || 0)) || (d.lat[i] < 0 && -d.lat[i] < (ed.r.road || 0));
+    if (!inRoad) continue;
+    const k = Math.floor(d.lat[i] / 0.2);
+    if (!cols.has(k)) cols.set(k, []);
+    cols.get(k).push(d.dz[i]);
+  }
+  const dev = [];
+  for (const v of cols.values()) {
+    if (v.length < 5) continue;
+    v.sort((a, b) => a - b);
+    const m = v[Math.floor(v.length / 2)];
+    for (const x of v) dev.push(Math.abs(x - m));
+  }
+  dev.sort((a, b) => a - b);
+  const spread = dev.length ? dev[Math.floor(dev.length / 2)] : null;
+  $("sec-info").textContent = `Colour = scan number (blue first, purple last); heights stretched ${zoom}×. ${d.lat.length.toLocaleString()} points from ${new Set(d.scan).size} scans at ${d.s.toFixed(0)} m. ` +
+    (spread !== null ? `On the road the scans scatter by a typical ${(100 * spread).toFixed(1)} cm around each other. ` : "") +
+    `Grade ${fmt(d.grade_pct)} %, banking ${fmt(d.bank_deg)}°.`;
+}
+
 // --- 3D -------------------------------------------------------------------------------
 // three.js treats vertex colours as linear light; our colours are sRGB, so convert
 // them or everything comes out pale and washed-out
@@ -833,6 +1009,7 @@ const FIELDS = [
     ["ground.method", "Ground segmentation", ["auto", "patchworkpp", "builtin"]],
     ["lidar.ground_max_range", "Max ground range (m)", "number", "Ground farther than this from the car is not used."],
     ["lidar.min_motion_m", "Skip frames until moved (m)", "number"],
+    ["lidar.deskew", "Correct scans for the car's motion", "bool", "Uses each point's time stamp so a scan taken while driving is not smeared."],
   ]],
   ["Elevation map", [
     ["grid.cell", "Cell size (m)", "number"], ["grid.fill_radius", "Fill gaps up to (cells)", "number"],

@@ -73,6 +73,7 @@
       <button data-tab="map" class="active">Map</button>
       <button data-tab="three">3D</button>
       <button data-tab="profile">Road profile</button>
+      <button data-tab="accuracy">Accuracy</button>
       <button data-tab="files">Files</button>
       <button data-tab="settings">Settings</button>
       <button data-tab="log">Log</button>
@@ -136,6 +137,24 @@
         <div class="chart"><h3>Curb height (m) <span class="key lidar">left</span> <span class="key car">right</span></h3><canvas id="ch-curb"></canvas></div>
         <div class="chart"><h3>Road roughness (m RMS)</h3><canvas id="ch-rough"></canvas></div>
       </div>
+    </section>
+
+    <section id="tab-accuracy" class="tab">
+      <div class="toolbar">
+        <button id="btn-accuracy" class="primary">Check accuracy</button>
+        <span id="acc-when" class="muted">Compares the recordings with themselves: there is no surveyed ground truth.</span>
+      </div>
+      <div id="acc-body"></div>
+      <h3>Look at the raw lidar across the road</h3>
+      <p class="muted help">Every ground point within 25 cm of the chosen spot, from every scan, coloured by scan number. If the scans line up, the colours sit on top of each other in one thin band; a spread or a step between colours is a pose or mounting error. Lines show what the app measured.</p>
+      <div class="toolbar">
+        <label>Road <select id="sec-road"></select></label>
+        <label>At <input id="sec-s" type="range" min="0" max="1" step="1" value="0" style="width: 260px"></label>
+        <span id="sec-s-text" class="muted"></span>
+        <label>Height scale <select id="sec-zoom"><option value="1">1×</option><option value="3">3×</option><option value="10" selected>10×</option></select></label>
+      </div>
+      <div class="chart"><canvas id="sec-canvas" style="height: 340px"></canvas></div>
+      <div id="sec-info" class="muted"></div>
     </section>
 
     <section id="tab-files" class="tab">

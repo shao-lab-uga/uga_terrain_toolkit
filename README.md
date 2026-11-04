@@ -36,6 +36,7 @@ Your browser opens at http://127.0.0.1:8090. Then:
    - **Map**: surface type, elevation, slope, roughness and intensity. Hover over a spot for its values, or click a road.
    - **3D**: the cleaned ground as a solid shaded surface (or as points).
    - **Road profile**: grade, banking, widths, curb heights and roughness along each road.
+   - **Accuracy**: press **Check accuracy** to see how far the map can be trusted (see below), and look at the raw lidar points across any road, coloured by scan.
    - **Files**: download the outputs.
 5. After changing Settings, use **Re-run from** to redo later steps without reading the recordings again.
 
@@ -85,13 +86,25 @@ python -m uga_terrain build --name campus --start roads     # redo roads + expor
 ## How it works
 
 1. **Poses.** The GNSS/INS track (WGS84 → local ENU) is fused with KISS-ICP lidar odometry. ICP is checked against GNSS/INS every frame.
-2. **Ground.** Patchwork++ separates ground from objects in each scan, and the car's own body is masked out.
-3. **Map.** Ground points from all drives go into a 20 cm × 10 cm voxel grid. Each cell keeps its dominant height, which drops cars and people that passed by. Raised blobs left over (parked cars, bins) are removed, and small holes are filled.
-4. **Surface layers.** Elevation, slope, aspect and roughness (plane-fit RMS plus point spread) are computed per cell.
-5. **Roads.** Cross-sections every metre along each drive find the road edges (curb, drop, rough or steep ground) and the curb height. Past each edge they find the verge and the sidewalk (a smooth, flat, raised strip). Banking and grade come from the surface itself, and the car's own roll and pitch are kept for comparison.
-6. **Export.** OpenDRIVE, CSV, PLY and raster files are written.
+2. **Motion correction.** Each Ouster scan takes 0.1 s, and the car moves during it. Every point is moved to where the lidar was at the moment that point was measured, using its per-point time stamp (Settings: lidar.deskew).
+3. **Ground.** Patchwork++ separates ground from objects in each scan, and the car's own body is masked out.
+4. **Map.** Ground points from all drives go into a 20 cm × 10 cm voxel grid. Each cell keeps its dominant height, which drops cars and people that passed by. Raised blobs left over (parked cars, bins) are removed, and small holes are filled.
+5. **Surface layers.** Elevation, slope, aspect and roughness (plane-fit RMS plus point spread) are computed per cell.
+6. **Roads.** Cross-sections every metre along each drive find the road edges (curb, drop, rough or steep ground) and the curb height. Past each edge they find the verge and the sidewalk (a smooth, flat, raised strip). Banking and grade come from the surface itself, and the car's own roll and pitch are kept for comparison.
+7. **Export.** OpenDRIVE, CSV, PLY and raster files are written.
 
 All tuning values are in `configs/default.yaml`. Changes made in the app go to `configs/local.yaml`.
+
+## Accuracy check
+
+There is no surveyed ground truth, so the check compares the recordings with themselves:
+
+- **Drive path.** How often lidar odometry disagreed with GNSS/INS, and how far the final path is from GNSS.
+- **Height error by distance.** Each ground point against the same cell seen from under 12 m away. This shows how far out the lidar heights can be trusted.
+- **Repeatability.** Two maps from the first and second half of the scans, and every road measurement repeated on each. The difference is how repeatable each value is.
+- **Cross-section viewer.** The raw points of every scan in a 50 cm slice across a road. Scans that line up form one thin band.
+
+The findings list says what to change when something is off (for example, a lower max ground range).
 
 ## Tests
 

@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from sim import write_drive
-from uga_terrain import pipeline
+from uga_terrain import accuracy, pipeline
 from uga_terrain.config import load_config
 
 
@@ -22,6 +22,16 @@ def test_build_from_mcap(tmp_path, monkeypatch):
     assert root.findall("road")
     assert summary["roads"]
     assert pipeline.steps_available(p) == ["scan", "map", "roads", "export"]
+
+    # accuracy check: a simulated drive with exact poses should agree with itself
+    acc = accuracy.check(p, cfg)
+    assert acc["by_range"] and acc["by_range"][0]["typical_m"] < 0.03
+    assert acc["halves"]["typical_m"] < 0.03
+    assert acc["roads"] and acc["verdict"]
+    road = pipeline.load_roads(p)[0]
+    xyz, _rng, scan, _rec = accuracy.load_scans(p)
+    sec = accuracy.section(p, road, float(road.s[len(road.s) // 2]), xyz, scan)
+    assert len(sec["lat"]) == len(sec["dz"]) == len(sec["scan"]) > 50
 
 
 def test_build_part_of_recording(tmp_path, monkeypatch):

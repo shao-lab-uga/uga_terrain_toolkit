@@ -120,7 +120,7 @@ def list_projects(cfg: dict) -> List[dict]:
 # --- step 1: scan --------------------------------------------------------------------------
 
 _SCAN_KEYS = ("topics", "frames", "pose", "lidar", "odometry", "ground")
-SCAN_VERSION = 2   # bump when scan output changes, so old caches are rebuilt
+SCAN_VERSION = 3   # bump when scan output changes, so old caches are rebuilt
 
 
 def clean_range(r) -> Optional[dict]:
@@ -161,6 +161,20 @@ def _scan_key(path: str, cfg: dict, origin, rng: Optional[dict] = None) -> str:
 
 def _rot_angle(R: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+
+
+def _deskew(xyz: np.ndarray, dt: np.ndarray, t: float, G: np.ndarray, T_bl: np.ndarray,
+            track, bin_s: float = 0.004) -> np.ndarray:
+    """Lidar-frame points measured at t + dt -> base frame at time t."""
+    out = np.empty_like(xyz)
+    G_inv = np.linalg.inv(G)
+    b = np.round(dt / bin_s).astype(np.int64)
+    for k in np.unique(b):
+        m = b == k
+        p, q = track.interp(t + k * bin_s)   # Ouster stamps a scan at its first column
+        M = G_inv @ poses.pose_matrix(p, q)[0] @ T_bl
+        out[m] = geo.transform(M, xyz[m])
+    return out
 
 
 def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
@@ -226,6 +240,9 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
     n_seen = 0
     n_icp_reset = 0
     t_first = None
+    deskew = bool(lid.get("deskew", True))
+    n_deskew = 0
+    T_bl_inv = np.linalg.inv(T_bl)
     for t_log, _topic, msg in iter_messages(path, [lidar_topic]):
         n_seen += 1
         if rng:
@@ -253,12 +270,21 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
             ang = _rot_angle(last_G[:3, :3].T @ G[:3, :3])
             if d < min_move and ang < min_turn:
                 continue
-        pts = range_filter(decode_pointcloud2(msg), float(lid.get("min_range") or 2.0),
-                           float(lid.get("max_range") or 80.0))
+        pts = range_filter(decode_pointcloud2(msg, with_time=deskew),
+                           float(lid.get("min_range") or 2.0), float(lid.get("max_range") or 80.0))
         if len(pts) < 100:
             continue
-        base = pts.copy()
-        base[:, :3] = geo.transform(T_bl, pts[:, :3].astype(np.float64))
+        base = pts[:, :4].copy()
+        if deskew and np.isfinite(pts[:, 4]).all():
+            # the lidar spins for ~0.1 s while the car moves; put every point
+            # where it was at the scan's time stamp, using the GNSS/INS motion
+            base[:, :3] = _deskew(pts[:, :3].astype(np.float64), pts[:, 4].astype(np.float64),
+                                  t, G, T_bl, track)
+            n_deskew += 1
+        else:
+            base[:, :3] = geo.transform(T_bl, pts[:, :3].astype(np.float64))
+        pts = pts[:, :4].copy()
+        pts[:, :3] = geo.transform(T_bl_inv, base[:, :3])
         keep = ~box_mask(base[:, :3], ego)
         base, pts = base[keep], pts[keep]
         gmask = seg.split(base)
@@ -330,6 +356,7 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
         "ground_method": seg.method,
         "gnss_vs_final_m": {"median": float(np.median(dev)), "max": float(np.max(dev))},
         "ground_height_under_car_m": float(np.median(heights)) if heights else None,
+        "deskewed_frames": n_deskew,
     }
     return stats
 

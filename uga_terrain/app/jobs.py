@@ -59,6 +59,13 @@ def _child(kind: str, cfg: dict, args: dict, q, ev, crash_log: Optional[str]) ->
         if kind == "build":
             project = pipeline.Project.open(cfg, args["name"])
             result = pipeline.build(project, cfg, prog, start=args.get("start") or "scan")
+        elif kind == "accuracy":
+            from uga_terrain import accuracy, export
+            project = pipeline.Project.open(cfg, args["name"])
+            result = accuracy.check(project, cfg, prog)
+            export.save_json(result, project.root / "accuracy.json")
+            prog.note("Accuracy check finished.")
+            result = {"accuracy": True}
         else:
             raise ValueError("unknown job %s" % kind)
         q.put(("done", result))

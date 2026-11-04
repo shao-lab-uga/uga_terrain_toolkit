@@ -119,3 +119,5 @@ code { font-size: 12px; }
 .rec-row .pill { white-space: nowrap; }
 .range-form { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 2px 0 6px; }
 .range-form .row { gap: 4px; font-size: 12px; }
+tr.warn td { color: var(--warn); font-weight: 600; }
+#tab-accuracy h4 { margin: 12px 0 4px; }
