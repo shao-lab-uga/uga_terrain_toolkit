@@ -36,6 +36,10 @@
         <button id="btn-create" title="Make a map from the ticked recordings">Create</button>
       </div>
       <div class="muted">Tick recordings above, name the map, then Create. All recordings in a map are merged into one terrain.</div>
+      <div class="row">
+        <button id="btn-import" title="Load a map exported from this app (.zip)">Import map…</button>
+        <input type="file" id="import-file" accept=".zip" hidden>
+      </div>
     </section>
     <section id="map-actions" hidden>
       <h2 id="map-title"></h2>
@@ -54,6 +58,13 @@
         <button id="btn-rebuild" title="Re-run later steps after changing Settings; skips reading the recordings again">Run</button>
       </div>
       <div id="map-steps" class="muted"></div>
+      <h3>Save and share</h3>
+      <div class="row wrap">
+        <button id="btn-snapshot" title="Save this map and the current settings as they are now (Ctrl+S)">Save snapshot</button>
+        <button id="btn-export" title="Download this map as one .zip to open on another computer">Export map</button>
+        <label class="muted" title="Bigger file, but the map can be rebuilt from Elevation map onwards without the recordings"><input type="checkbox" id="export-cache"> with scan cache</label>
+      </div>
+      <div id="snap-list" class="list"></div>
     </section>
   </aside>
 
@@ -79,13 +90,16 @@
           </select></label>
         <label><input type="checkbox" id="show-roads" checked> Roads</label>
         <label><input type="checkbox" id="show-drives" checked> Drive path</label>
-        <button id="btn-fit" class="small">Fit</button>
+        <label><input type="checkbox" id="show-legend" checked> Legend</label>
+        <button id="btn-fit" class="small" title="Fit the map and turn north up">Fit</button>
+        <span class="muted">Drag to pan, right-drag to rotate, scroll to zoom.</span>
         <span id="legend" class="legend"></span>
       </div>
       <div class="map-wrap">
         <canvas id="map-canvas"></canvas>
         <div id="readout" class="readout">Move the mouse over the map</div>
         <div id="map-empty" class="empty">Build a map to see it here.</div>
+        <div id="map-legend" class="legend-box" hidden></div>
       </div>
     </section>
 
@@ -98,9 +112,9 @@
           </select></label>
         <label>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
         <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" value="1"></label>
-        <span class="muted">Drag to rotate, right-drag to pan, scroll to zoom.</span>
+        <span class="muted">Right-drag to rotate, left-drag to pan, scroll to zoom.</span>
       </div>
-      <div id="three-wrap" class="three-wrap"><div id="three-msg" class="empty">Open this tab after a map is built.</div></div>
+      <div id="three-wrap" class="three-wrap"><div id="three-msg" class="empty">Open this tab after a map is built.</div><div id="three-legend" class="legend-box" hidden></div></div>
     </section>
 
     <section id="tab-profile" class="tab">
@@ -137,6 +151,9 @@
       <div id="settings-form" class="settings"></div>
       <div class="row">
         <button id="btn-save-settings" class="primary">Save settings</button>
+        <button id="btn-export-settings" title="Download the settings as a .yaml file">Export settings</button>
+        <button id="btn-import-settings" title="Load settings from a .yaml file">Import settings…</button>
+        <input type="file" id="import-settings-file" accept=".yaml,.yml" hidden>
         <span id="settings-msg" class="muted"></span>
       </div>
       <details>

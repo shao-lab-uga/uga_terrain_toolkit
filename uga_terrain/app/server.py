@@ -4,7 +4,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import shutil
 import struct
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -12,11 +15,12 @@ from typing import List, Optional
 
 import numpy as np
 import yaml
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from uga_terrain import __version__, config as config_mod, mcap_io, pipeline, poses
+from uga_terrain.app import archive
 from uga_terrain.app.jobs import JobManager
 from uga_terrain.grid import LABELS, TerrainGrid
 from uga_terrain.ground import patchwork_available
@@ -40,6 +44,11 @@ def _scan_folders(cfg) -> List[dict]:
                         "rel": str(p.relative_to(root)), "size": st.st_size,
                         "mtime": st.st_mtime})
     return out
+
+
+def _cleanup(path: str):
+    from starlette.background import BackgroundTask
+    return BackgroundTask(lambda: os.path.exists(path) and os.unlink(path))
 
 
 def create_app(crash_log: Optional[str] = None) -> FastAPI:
@@ -94,7 +103,10 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
                 raise HTTPException(400, "settings are not valid YAML: %s" % e)
             if not isinstance(new, dict):
                 raise HTTPException(400, "settings must be a mapping")
-            changes = new
+            if body.get("keep_work_dir"):
+                new["work_dir"] = cfg().get("work_dir")
+            c = config_mod.save_local(new, replace=True)
+            return {"config": c, "yaml": yaml.safe_dump(c, sort_keys=False)}
         else:
             changes = body.get("changes") or {}
         c = config_mod.save_local(changes)
@@ -275,6 +287,76 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         buf.seek(0)
         return StreamingResponse(buf, media_type="application/zip", headers={
             "Content-Disposition": 'attachment; filename="%s_rasters.zip"' % p.root.name})
+
+    # --- export / import / snapshots -----------------------------------------------------
+    def _no_job():
+        if jobs.busy():
+            raise HTTPException(409, "wait for the running job to finish")
+
+    @app.get("/api/maps/{slug}/export")
+    def export_map(slug: str, cache: bool = False):
+        p = project(slug)
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        tmp.close()
+        archive.export_project(p.root, tmp.name, include_cache=cache)
+        name = "%s_%s.terrainmap.zip" % (p.root.name, time.strftime("%Y%m%d-%H%M"))
+        return FileResponse(tmp.name, filename=name, media_type="application/zip",
+                            background=_cleanup(tmp.name))
+
+    @app.post("/api/maps/import")
+    async def import_map(request: Request, filename: str = "map.zip"):
+        _no_job()
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        try:
+            with tmp:
+                async for chunk in request.stream():
+                    tmp.write(chunk)
+            try:
+                slug = archive.import_project(tmp.name, config_mod.work_dir(cfg()) / "projects",
+                                              fallback_name=Path(filename).stem)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        finally:
+            os.unlink(tmp.name)
+        return pipeline.Project(config_mod.work_dir(cfg()) / "projects" / slug).status()
+
+    @app.get("/api/maps/{slug}/snapshots")
+    def snapshots(slug: str):
+        return {"snapshots": archive.list_snapshots(project(slug).root)}
+
+    @app.post("/api/maps/{slug}/snapshots")
+    def save_snapshot(slug: str, body: dict = Body(default={})):
+        _no_job()
+        p = project(slug)
+        return archive.save_snapshot(p.root, (body.get("label") or "").strip(),
+                                     yaml.safe_dump(cfg(), sort_keys=False))
+
+    @app.post("/api/maps/{slug}/snapshots/{sid}/restore")
+    def restore_snapshot(slug: str, sid: str, body: dict = Body(default={})):
+        _no_job()
+        p = project(slug)
+        settings_yaml = archive.restore_snapshot(p.root, sid)
+        if body.get("settings", True) and settings_yaml:
+            new = yaml.safe_load(settings_yaml) or {}
+            new["work_dir"] = cfg().get("work_dir")   # never move the maps folder on a restore
+            config_mod.save_local(new, replace=True)
+        grids.clear()
+        return p.status()
+
+    @app.delete("/api/maps/{slug}/snapshots/{sid}")
+    def delete_snapshot(slug: str, sid: str):
+        archive.delete_snapshot(project(slug).root, sid)
+        return {"ok": True}
+
+    @app.get("/api/settings/export")
+    def export_settings():
+        return Response(yaml.safe_dump(cfg(), sort_keys=False), media_type="application/x-yaml",
+                        headers={"Content-Disposition":
+                                 'attachment; filename="uga_terrain_settings.yaml"'})
+
+    @app.exception_handler(FileNotFoundError)
+    async def not_found(_req, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=404)
 
     @app.exception_handler(Exception)
     async def err(_req, exc):

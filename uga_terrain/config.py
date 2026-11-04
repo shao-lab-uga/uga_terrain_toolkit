@@ -48,11 +48,34 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     return cfg
 
 
-def save_local(changes: dict) -> Dict[str, Any]:
-    """Merge ``changes`` into configs/local.yaml and return the new config."""
-    cur = deep_merge(_read(local_path()), changes)
-    with open(local_path(), "w") as f:
-        yaml.safe_dump(cur, f, sort_keys=False)
+def _diff(cur: dict, base: dict) -> dict:
+    """The parts of ``cur`` that differ from ``base``."""
+    out = {}
+    for k, v in cur.items():
+        b = base.get(k) if isinstance(base, dict) else None
+        if isinstance(v, dict) and isinstance(b, dict):
+            d = _diff(v, b)
+            if d:
+                out[k] = d
+        elif v != b:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def save_local(changes: dict, replace: bool = False) -> Dict[str, Any]:
+    """Merge ``changes`` into configs/local.yaml (or replace it) and return the new config.
+
+    Only values that differ from configs/default.yaml are written, so later
+    updates to the defaults still reach settings the user never changed."""
+    cur = deep_merge({} if replace else _read(local_path()), changes)
+    if os.environ.get("UGA_TERRAIN_WORK_DIR") and cur.get("work_dir") == os.environ["UGA_TERRAIN_WORK_DIR"]:
+        cur.pop("work_dir")
+    cur = _diff(cur, _read(default_path()))
+    if cur:
+        with open(local_path(), "w") as f:
+            yaml.safe_dump(cur, f, sort_keys=False)
+    elif local_path().is_file():
+        local_path().unlink()
     return load_config()
 
 

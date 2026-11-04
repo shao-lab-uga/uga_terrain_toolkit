@@ -115,8 +115,68 @@ async function selectMap(slug, reload = true) {
   $("map-steps").textContent = (st.built ? "Last built " + st.built + "   " : "") + steps;
   [...$("rebuild-from").options].forEach((o) => (o.disabled = !st.can_start.includes(o.value)));
   $("btn-rebuild").disabled = st.can_start.length < 2;
+  await loadSnapshots();
   if (reload) await loadResults();
 }
+
+// --- snapshots, export, import ------------------------------------------------------------
+async function loadSnapshots() {
+  const L = $("snap-list");
+  L.innerHTML = "";
+  if (!S.map) return;
+  const { snapshots } = await api(`/api/maps/${S.map}/snapshots`);
+  if (!snapshots.length) { L.append(el("div", { class: "muted" }, "No snapshots yet.")); return; }
+  for (const sn of snapshots) {
+    L.append(el("div", { class: "item", title: `Saved ${sn.saved}` + (sn.built ? `, map built ${sn.built}` : "") },
+      el("div", { class: "grow" }, el("div", {}, sn.label), el("div", { class: "sub" }, `${sn.saved} · ${fmtSize(sn.size)}`)),
+      el("button", { class: "small", title: "Put the map and settings back the way they were", onclick: guard(async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Restore "${sn.label}" from ${sn.saved}?\n\nThe map's current results and settings are replaced. Save a snapshot first if you want to keep them.`)) return;
+        await api(`/api/maps/${S.map}/snapshots/${sn.id}/restore`, { method: "POST", body: { settings: true } });
+        toast(`Restored "${sn.label}".`);
+        await loadMaps();
+        if ($("tab-settings").classList.contains("active")) await loadSettings();
+      }) }, "Restore"),
+      el("button", { class: "small", title: "Delete this snapshot", onclick: guard(async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete the snapshot "${sn.label}" from ${sn.saved}?`)) return;
+        await api(`/api/maps/${S.map}/snapshots/${sn.id}`, { method: "DELETE" });
+        await loadSnapshots();
+      }) }, "✕")));
+  }
+}
+async function saveSnapshot() {
+  if (!S.map) throw new Error("Pick a map first.");
+  const label = prompt("Name this snapshot (optional):", "");
+  if (label === null) return;
+  const sn = await api(`/api/maps/${S.map}/snapshots`, { method: "POST", body: { label } });
+  toast(`Saved snapshot "${sn.label}" (${fmtSize(sn.size)}).`);
+  await loadSnapshots();
+}
+$("btn-snapshot").addEventListener("click", guard(saveSnapshot));
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); guard(saveSnapshot)(); }
+});
+$("btn-export").addEventListener("click", () => {
+  if (!S.map) return;
+  const a = el("a", { href: `/api/maps/${S.map}/export?cache=${$("export-cache").checked}`, download: "" });
+  document.body.append(a); a.click(); a.remove();
+  toast("Exporting the map; your browser will save the .zip when it is ready.");
+});
+$("btn-import").addEventListener("click", () => $("import-file").click());
+$("import-file").addEventListener("change", guard(async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  toast(`Importing ${f.name} ...`);
+  const r = await fetch(`/api/maps/import?filename=${encodeURIComponent(f.name)}`, { method: "POST", body: f,
+    headers: { "Content-Type": "application/zip" } });
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (_) { /* */ } throw new Error(m); }
+  const st = await r.json();
+  S.map = st.slug;
+  await loadMaps();
+  toast(`Imported "${st.name}".` + (st.steps && st.steps.export ? "" : " Build it to see results."));
+}));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
   S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.road = null;
@@ -185,7 +245,7 @@ async function pollJob() {
 function showJob(j) {
   const bar = $("job-bar");
   $("btn-stop").hidden = !(j && j.state === "running");
-  ["btn-build", "btn-rebuild", "btn-add"].forEach((id) => ($(id).disabled = !!(j && j.state === "running")));
+  ["btn-build", "btn-rebuild", "btn-add", "btn-snapshot", "btn-import"].forEach((id) => ($(id).disabled = !!(j && j.state === "running")));
   if (!j) { bar.className = "job idle"; $("job-text").textContent = "No job running"; return; }
   const pct = Math.round(100 * j.done / Math.max(j.total, 1));
   $("job-fill").style.width = pct + "%";
@@ -223,7 +283,7 @@ function fitView() {
   const [x0, y0, x1, y1] = dataBounds(p.extent);
   const w = cv.clientWidth, h = cv.clientHeight;
   const sc = Math.min(w / Math.max(x1 - x0, 1), h / Math.max(y1 - y0, 1)) * 0.92;
-  S.view = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, s: sc };
+  S.view = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, s: sc, rot: 0 };
 }
 function dataBounds(ext) {
   let xs = [], ys = [];
@@ -232,10 +292,17 @@ function dataBounds(ext) {
   const pad = 40;
   return [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad];
 }
-const toPx = (x, y) => [cv.width / 2 + (x - S.view.cx) * S.view.s * devicePixelRatio,
-                        cv.height / 2 - (y - S.view.cy) * S.view.s * devicePixelRatio];
-const toW = (px, py) => [S.view.cx + (px * devicePixelRatio - cv.width / 2) / (S.view.s * devicePixelRatio),
-                         S.view.cy - (py * devicePixelRatio - cv.height / 2) / (S.view.s * devicePixelRatio)];
+// world (x east, y north) <-> canvas pixels; the view can be rotated by S.view.rot (rad, CCW)
+function toPx(x, y) {
+  const c = Math.cos(S.view.rot), s = Math.sin(S.view.rot), k = S.view.s * devicePixelRatio;
+  const dx = x - S.view.cx, dy = y - S.view.cy;
+  return [cv.width / 2 + (c * dx - s * dy) * k, cv.height / 2 - (s * dx + c * dy) * k];
+}
+function toW(px, py) {      // px, py in CSS pixels
+  const c = Math.cos(S.view.rot), s = Math.sin(S.view.rot), k = S.view.s * devicePixelRatio;
+  const rx = (px * devicePixelRatio - cv.width / 2) / k, ry = -(py * devicePixelRatio - cv.height / 2) / k;
+  return [S.view.cx + c * rx + s * ry, S.view.cy - s * rx + c * ry];
+}
 function drawMap() {
   if (!$("tab-map").classList.contains("active")) return;
   const w = cv.clientWidth, h = cv.clientHeight;
@@ -250,9 +317,14 @@ function drawMap() {
   const img = getImage(layer in S.previews ? layer : "elevation");
   if (img.complete && img.naturalWidth) {
     const [x0, y0, x1, y1] = p.extent;
-    const [a, b] = toPx(x0, y1), [c, d] = toPx(x1, y0);
+    const [a, b] = toPx(x0, y1);
+    const k = S.view.s * devicePixelRatio;
     ctx.imageSmoothingEnabled = S.view.s * (x1 - x0) / p.width < 2;
-    ctx.drawImage(img, a, b, c - a, d - b);
+    ctx.save();
+    ctx.translate(a, b);
+    ctx.rotate(-S.view.rot);
+    ctx.drawImage(img, 0, 0, (x1 - x0) * k, (y1 - y0) * k);
+    ctx.restore();
   }
   if ($("show-drives").checked) {
     ctx.lineWidth = 1.5 * devicePixelRatio;
@@ -274,6 +346,28 @@ function drawMap() {
     }
   }
   scaleBar();
+  northArrow();
+  mapLegend(p, layer);
+}
+function northArrow() {
+  const d = devicePixelRatio, R = 22 * d, r = 9 * d, x = 34 * d, y = 34 * d;
+  const ang = -S.view.rot;           // screen angle of north, clockwise from straight up
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "rgba(255,255,255,.85)";
+  ctx.beginPath(); ctx.arc(0, 0, R, 0, 2 * Math.PI); ctx.fill();
+  ctx.save();
+  ctx.rotate(ang);
+  ctx.translate(0, 5 * d);
+  ctx.fillStyle = "#b5121b";
+  ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(4.5 * d, 0); ctx.lineTo(-4.5 * d, 0); ctx.fill();
+  ctx.fillStyle = "#777";
+  ctx.beginPath(); ctx.moveTo(0, r); ctx.lineTo(4.5 * d, 0); ctx.lineTo(-4.5 * d, 0); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "#222"; ctx.font = `bold ${10 * d}px system-ui`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("N", Math.sin(ang) * 13 * d, -Math.cos(ang) * 13 * d);
+  ctx.restore();
 }
 function polyline(xs, ys) {
   ctx.beginPath();
@@ -293,6 +387,60 @@ function scaleBar() {
   ctx.font = `${11 * devicePixelRatio}px system-ui`;
   ctx.fillText(nice + " m", x, y - 6 * devicePixelRatio);
 }
+// colour stops of the preview images (uga_terrain/export.py _STOPS)
+const STOPS = {
+  terrain: [[0, [40, 70, 160]], [0.25, [60, 150, 200]], [0.45, [90, 180, 110]], [0.65, [220, 210, 120]], [0.85, [170, 110, 70]], [1, [250, 250, 250]]],
+  heat: [[0, [20, 40, 90]], [0.35, [40, 150, 160]], [0.65, [240, 200, 70]], [1, [220, 50, 40]]],
+  gray: [[0, [20, 20, 20]], [1, [245, 245, 245]]],
+};
+const LAYER_MAP = { elevation: "terrain", slope: "heat", roughness: "heat", intensity: "gray" };
+function rampColor(name, f) {
+  const st = STOPS[name];
+  f = Math.min(Math.max(f, 0), 1);
+  for (let i = 1; i < st.length; i++) {
+    if (f <= st[i][0]) {
+      const [f0, c0] = st[i - 1], [f1, c1] = st[i], t = (f - f0) / Math.max(f1 - f0, 1e-9);
+      return c0.map((v, k) => Math.round(v + (c1[k] - v) * t));
+    }
+  }
+  return st[st.length - 1][1];
+}
+function niceSteps(lo, hi, n = 8) {
+  const raw = (hi - lo) / n, p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-9))));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= raw) || raw;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out.length >= 2 ? out : [lo, hi];
+}
+// legend box: one colour swatch per value; elevation also in metres above sea level
+function legendBox(box, { title, ramp, lo, hi, unit, digits, asl, note }) {
+  box.innerHTML = "";
+  box.append(el("div", { class: "t" }, title));
+  if (asl !== undefined) box.append(el("div", { class: "st hdr" }, el("span", { class: "sw" }), el("span", { class: "v" }, "relative"), el("span", { class: "asl" }, "GPS altitude")));
+  const vals = niceSteps(lo, hi).reverse();
+  for (const v of vals) {
+    const c = rampColor(ramp, (v - lo) / Math.max(hi - lo, 1e-9));
+    const row = el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${c.join(",")})` }),
+      el("span", { class: "v" }, `${v > 0 && asl !== undefined ? "+" : ""}${v.toFixed(digits)} ${unit}`));
+    if (asl !== undefined) row.append(el("span", { class: "asl" }, `${(asl + v).toFixed(1)} m`));
+    box.append(row);
+  }
+  if (note) box.append(el("div", { class: "note" }, note));
+  box.hidden = false;
+}
+function mapLegend(p, layer) {
+  const box = $("map-legend");
+  const ramp = LAYER_MAP[layer];
+  if (!p || !ramp || !$("show-legend").checked) { box.hidden = true; return; }
+  const origin = S.status && S.status.origin;
+  if (layer === "elevation") {
+    legendBox(box, { title: "Elevation", ramp, lo: p.min, hi: p.max, unit: "m",
+      digits: p.max - p.min < 5 ? 2 : 1, asl: origin ? origin[2] : undefined,
+      note: "Relative = height compared with where the first drive starts." });
+  } else if (layer === "slope") legendBox(box, { title: "Slope", ramp, lo: p.min, hi: p.max, unit: "°", digits: 0 });
+  else if (layer === "roughness") legendBox(box, { title: "Roughness (RMS)", ramp, lo: 0, hi: 6, unit: "cm", digits: 1 });
+  else legendBox(box, { title: "Lidar intensity", ramp, lo: p.min, hi: p.max, unit: "", digits: 0 });
+}
 function legend(p) {
   const L = $("legend");
   L.innerHTML = "";
@@ -301,28 +449,35 @@ function legend(p) {
     for (const c of Object.values(p.classes)) {
       L.append(el("span", {}, el("span", { class: "sw", style: `background: rgb(${c.rgb.join(",")})` }), c.name));
     }
-  } else {
-    const grad = { elevation: "#2846a0,#3c96c8,#5ab46e,#dcd278,#aa6e46,#fafafa",
-                   slope: "#14285a,#2896a0,#f0c846,#dc3228", roughness: "#14285a,#2896a0,#f0c846,#dc3228",
-                   intensity: "#141414,#f5f5f5" }[$("layer").value] || "#000,#fff";
-    L.append(`${fmt(p.min, p.unit === "m" ? 2 : 0)} ${p.unit}`,
-      el("span", { class: "ramp", style: `background: linear-gradient(90deg, ${grad})` }),
-      `${fmt(p.max, p.unit === "m" ? 2 : 0)} ${p.unit}`);
   }
 }
 let drag = null;
-cv.addEventListener("mousedown", (e) => { if (S.view) drag = { x: e.offsetX, y: e.offsetY, cx: S.view.cx, cy: S.view.cy, moved: false }; });
+const centreAngle = (x, y) => Math.atan2(y - cv.clientHeight / 2, x - cv.clientWidth / 2);
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+cv.addEventListener("mousedown", (e) => {
+  if (!S.view) return;
+  e.preventDefault();
+  drag = { x: e.offsetX, y: e.offsetY, moved: false, rotate: e.button === 2,
+           anchor: toW(e.offsetX, e.offsetY), a0: centreAngle(e.offsetX, e.offsetY), rot0: S.view.rot };
+  cv.style.cursor = drag.rotate ? "alias" : "grabbing";
+});
 window.addEventListener("mouseup", (e) => {
-  if (drag && !drag.moved && e.target === cv) pickRoad(e.offsetX, e.offsetY);
+  if (drag && !drag.moved && !drag.rotate && e.target === cv) pickRoad(e.offsetX, e.offsetY);
   drag = null;
+  cv.style.cursor = "";
 });
 cv.addEventListener("mousemove", (e) => {
   if (!S.view) return;
   if (drag) {
     const dx = e.offsetX - drag.x, dy = e.offsetY - drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    S.view.cx = drag.cx - dx / S.view.s;
-    S.view.cy = drag.cy + dy / S.view.s;
+    if (drag.rotate) {
+      // turn the map about the centre of the view, following the mouse
+      S.view.rot = drag.rot0 - (centreAngle(e.offsetX, e.offsetY) - drag.a0);
+    } else {
+      const [wx, wy] = toW(e.offsetX, e.offsetY);   // keep the grabbed point under the mouse
+      S.view.cx += drag.anchor[0] - wx; S.view.cy += drag.anchor[1] - wy;
+    }
     drawMap();
     return;
   }
@@ -360,7 +515,7 @@ function pickRoad(px, py) {
   }
   if (best !== null) { S.road = best; $("road-select").value = best; drawMap(); drawProfile(); toast(`Road ${best} selected; see the Road profile tab.`); }
 }
-["layer", "show-roads", "show-drives"].forEach((id) => $(id).addEventListener("change", drawMap));
+["layer", "show-roads", "show-drives", "show-legend"].forEach((id) => $(id).addEventListener("change", drawMap));
 $("btn-fit").addEventListener("click", () => { S.view = null; drawMap(); });
 window.addEventListener("resize", () => { drawMap(); drawProfile(); if (S.three) S.three.resize(); });
 
@@ -465,8 +620,9 @@ async function open3D() {
   let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < n; i++) { cx += xyz[3 * i]; cy += xyz[3 * i + 1]; cz += xyz[3 * i + 2]; }
   cx /= n; cy /= n; cz /= n;
-  let zmin = Infinity, zmax = -Infinity;
-  for (let i = 0; i < n; i++) { const z = xyz[3 * i + 2]; if (z < zmin) zmin = z; if (z > zmax) zmax = z; }
+  // colour range: 1st to 99th percentile of height, like the map
+  const zs = Float32Array.from({ length: Math.min(n, 20000) }, (_, k) => xyz[3 * Math.floor(k * n / Math.min(n, 20000)) + 2]).sort();
+  const zmin = zs[Math.floor(0.01 * (zs.length - 1))], zmax = zs[Math.floor(0.99 * (zs.length - 1))];
   const pos = new Float32Array(n * 3);
   const wrap = $("three-wrap");
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -483,6 +639,10 @@ async function open3D() {
   const mat = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true });
   scene.add(new THREE.Points(geom, mat));
   const controls = new OrbitControls(cam, renderer.domElement);
+  // right button turns the view, left button moves it, wheel zooms
+  controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.screenSpacePanning = false;
+  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
   let span = 0;
   for (let i = 0; i < n; i++) span = Math.max(span, Math.abs(xyz[3 * i] - cx), Math.abs(xyz[3 * i + 1] - cy));
   cam.position.set(0, -span * 1.1, span * 0.8);
@@ -496,8 +656,7 @@ async function open3D() {
       pos[3 * i] = xyz[3 * i] - cx; pos[3 * i + 1] = xyz[3 * i + 1] - cy; pos[3 * i + 2] = (xyz[3 * i + 2] - cz) * ex;
       let c;
       if (byZ) {
-        const f = (xyz[3 * i + 2] - zmin) / Math.max(zmax - zmin, 1e-6);
-        c = [0.15 + 0.8 * f, 0.35 + 0.4 * Math.sin(Math.PI * f), 0.85 - 0.75 * f];
+        c = rampColor("terrain", (xyz[3 * i + 2] - zmin) / Math.max(zmax - zmin, 1e-6)).map((v) => v / 255);
       } else c = LUT[lab[i]] || LUT[0];
       col[3 * i] = c[0]; col[3 * i + 1] = c[1]; col[3 * i + 2] = c[2];
     }
@@ -505,6 +664,17 @@ async function open3D() {
     geom.attributes.color.needsUpdate = true;
     geom.computeBoundingSphere();
     mat.size = Number($("three-size").value);
+    const origin = S.status && S.status.origin;
+    if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: "terrain", lo: zmin, hi: zmax, unit: "m",
+      digits: zmax - zmin < 5 ? 2 : 1, asl: origin ? origin[2] : undefined });
+    else {
+      const box = $("three-legend");
+      box.innerHTML = "";
+      box.append(el("div", { class: "t" }, "Surface"));
+      [["road", 1], ["sidewalk", 2], ["curb", 3], ["other ground", 4]].forEach(([name, k]) =>
+        box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${LUT[k].map((v) => Math.round(v * 255)).join(",")})` }), el("span", { class: "v" }, name))));
+      box.hidden = false;
+    }
   };
   update();
   ["three-color", "three-exag", "three-size"].forEach((id) => $(id).addEventListener("input", update));
@@ -516,7 +686,7 @@ async function open3D() {
   const loop = () => { if (!alive) return; controls.update(); renderer.render(scene, cam); requestAnimationFrame(loop); };
   resize(); loop();
   $("three-msg").hidden = true;
-  S.three = { resize, dispose: () => { alive = false; renderer.dispose(); renderer.domElement.remove(); } };
+  S.three = { resize, dispose: () => { alive = false; $("three-legend").hidden = true; renderer.dispose(); renderer.domElement.remove(); } };
 }
 
 // --- files -------------------------------------------------------------------------------
@@ -606,6 +776,19 @@ $("btn-save-settings").addEventListener("click", guard(async () => {
   });
   await api("/api/settings", { method: "PUT", body: { changes } });
   $("settings-msg").textContent = "Saved. Re-run the map (left panel) for the changes to take effect.";
+  await loadSettings(); await loadRecordings();
+}));
+$("btn-export-settings").addEventListener("click", () => {
+  const a = el("a", { href: "/api/settings/export", download: "uga_terrain_settings.yaml" });
+  document.body.append(a); a.click(); a.remove();
+});
+$("btn-import-settings").addEventListener("click", () => $("import-settings-file").click());
+$("import-settings-file").addEventListener("change", guard(async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  await api("/api/settings", { method: "PUT", body: { yaml: await f.text(), keep_work_dir: true } });
+  toast(`Settings loaded from ${f.name}. Re-run the map for them to take effect.`);
   await loadSettings(); await loadRecordings();
 }));
 $("btn-save-yaml").addEventListener("click", guard(async () => {

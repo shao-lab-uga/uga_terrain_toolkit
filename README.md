@@ -41,6 +41,13 @@ Your browser opens at http://127.0.0.1:8090. Then:
 
 To merge more drives into an existing map, tick them and press **Add ticked recordings**, then **Build map**.
 
+**Moving around the map and 3D views:** drag with the left button to pan, hold the right button and drag to rotate, and scroll to zoom. **Fit** turns north back up. The legend shows the elevation of each colour, both relative to the start of the first drive and as GPS altitude.
+
+**Saving and sharing.** Maps save automatically. In addition:
+- **Save snapshot** (or Ctrl+S) keeps a copy of the map and the settings as they are right now. **Restore** puts both back later.
+- **Export map** downloads the whole map as one `.zip`. **Import map…** loads that zip on another computer. Tick *with scan cache* to include the per-frame scan data. That makes the file bigger but lets the other computer rebuild from *Elevation map* without the recordings.
+- **Settings → Export settings / Import settings…** moves your settings between computers as a `.yaml` file.
+
 ## Outputs
 
 Outputs are written to `~/uga_terrain_work/projects/<map>/outputs/`:

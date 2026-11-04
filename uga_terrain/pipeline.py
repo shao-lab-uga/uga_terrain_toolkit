@@ -532,12 +532,14 @@ def build(project: Project, cfg: dict, progress: Optional[Progress] = None,
 
 
 def steps_available(project: Project) -> List[str]:
-    """Steps a rebuild may start from (the ones whose inputs exist)."""
+    """Steps a rebuild may start from (the ones whose inputs exist).
+
+    An imported map without its scan cache can still redo roads and export."""
     ok = ["scan"]
     if all((project.cache(i) / "frames.npz").is_file() for i in range(len(project.recordings))):
         ok.append("map")
-        if (project.root / "grid" / "grid.json").is_file():
-            ok.append("roads")
-            if (project.root / "roads.json").is_file():
-                ok.append("export")
+    if (project.root / "grid" / "grid.json").is_file():
+        ok.append("roads")
+        if (project.root / "roads.json").is_file():
+            ok.append("export")
     return ok
