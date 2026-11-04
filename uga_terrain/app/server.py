@@ -261,6 +261,19 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         return Response(head + xyz.tobytes() + a["label"].astype("u1").tobytes(),
                         media_type="application/octet-stream")
 
+    @app.get("/api/maps/{slug}/surface")
+    def surface(slug: str, max_px: int = Query(900, ge=64, le=2048)):
+        """Height grid for the 3D view: u32 w, u32 h, f32 x0 y0 x1 y1, f32 z[h*w]
+        (NaN = no ground, rows north to south), u8 label[h*w]."""
+        g = grid_of(project(slug))
+        z, ext = g.mosaic("z", max_px)
+        lab, _ = g.mosaic("label", max_px, how="nearest")
+        lab = np.nan_to_num(lab, nan=0).astype("u1")
+        h, w = z.shape
+        head = struct.pack("<II4f", w, h, *ext)
+        return Response(head + z.astype("<f4").tobytes() + lab.tobytes(),
+                        media_type="application/octet-stream")
+
     @app.get("/api/maps/{slug}/files")
     def files(slug: str):
         out = project(slug).out

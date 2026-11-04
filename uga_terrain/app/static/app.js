@@ -599,70 +599,127 @@ function drawProfile() {
 }
 
 // --- 3D -------------------------------------------------------------------------------
+// three.js treats vertex colours as linear light; our colours are sRGB, so convert
+// them or everything comes out pale and washed-out
+const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+const SURFACE_RGB = { 0: [120, 120, 120], 1: [90, 90, 97], 2: [230, 199, 89], 3: [230, 79, 61], 4: [110, 171, 89] };
+let three3D = null;     // loaded three.js modules
 async function open3D() {
   if (!S.summary) { $("three-msg").hidden = false; $("three-msg").textContent = "Build a map first."; return; }
   if (S.three) { S.three.resize(); return; }
   $("three-msg").hidden = false;
-  $("three-msg").textContent = "Loading the ground point cloud ...";
-  let THREE, OrbitControls;
+  $("three-msg").textContent = "Loading the 3D terrain ...";
   try {
-    THREE = await import("three");
-    ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+    if (!three3D) {
+      const THREE = await import("three");
+      const { OrbitControls } = await import("three/addons/controls/OrbitControls.js");
+      three3D = { THREE, OrbitControls };
+    }
   } catch (e) {
     $("three-msg").textContent = "The 3D viewer (three.js) could not load: " + e.message;
     return;
   }
-  const buf = await api(`/api/maps/${S.map}/cloud?max_points=800000`);
-  const n = new DataView(buf).getUint32(0, true);
-  const xyz = new Float32Array(buf, 4, n * 3);
-  const lab = new Uint8Array(buf, 4 + n * 12, n);
-  let cx = 0, cy = 0, cz = 0;
-  for (let i = 0; i < n; i++) { cx += xyz[3 * i]; cy += xyz[3 * i + 1]; cz += xyz[3 * i + 2]; }
-  cx /= n; cy /= n; cz /= n;
-  // colour range: 1st to 99th percentile of height, like the map
-  const zs = Float32Array.from({ length: Math.min(n, 20000) }, (_, k) => xyz[3 * Math.floor(k * n / Math.min(n, 20000)) + 2]).sort();
-  const zmin = zs[Math.floor(0.01 * (zs.length - 1))], zmax = zs[Math.floor(0.99 * (zs.length - 1))];
-  const pos = new Float32Array(n * 3);
+  const { THREE, OrbitControls } = three3D;
+  const map = S.map;
+
+  // --- data: height grid (solid surface) -------------------------------------------
+  const buf = await api(`/api/maps/${map}/surface?max_px=900`);
+  if (map !== S.map) return;
+  const dv = new DataView(buf);
+  const W = dv.getUint32(0, true), H = dv.getUint32(4, true);
+  const [x0, y0, x1, y1] = [0, 1, 2, 3].map((k) => dv.getFloat32(8 + 4 * k, true));
+  const Z = new Float32Array(buf.slice(24, 24 + 4 * W * H));
+  const L = new Uint8Array(buf, 24 + 4 * W * H, W * H);
+  const px = (x1 - x0) / W;
+  const N = W * H;
+  const valid = [];
+  for (let i = 0; i < N; i++) if (Number.isFinite(Z[i])) valid.push(Z[i]);
+  if (!valid.length) { $("three-msg").textContent = "This map has no ground cells."; return; }
+  const zsort = Float32Array.from(valid).sort();
+  const zmin = zsort[Math.floor(0.01 * (zsort.length - 1))], zmax = zsort[Math.floor(0.99 * (zsort.length - 1))];
+  const zmid = zsort[Math.floor(0.5 * (zsort.length - 1))];
+  // centre of the ground, so the view orbits around it
+  let cxs = 0, cys = 0, nv = 0, cmin = W, cmax = 0, rmin = H, rmax = 0;
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) if (Number.isFinite(Z[r * W + c])) {
+    cxs += c; cys += r; nv++;
+    if (c < cmin) cmin = c; if (c > cmax) cmax = c; if (r < rmin) rmin = r; if (r > rmax) rmax = r;
+  }
+  const cc = cxs / nv, cr = cys / nv;
+  const cx = x0 + (cc + 0.5) * px, cy = y1 - (cr + 0.5) * px;
+
+  const pos = new Float32Array(N * 3);
+  const col = new Float32Array(N * 3);
+  const idx = [];
+  for (let r = 0; r + 1 < H; r++) {
+    for (let c = 0; c + 1 < W; c++) {
+      const a = r * W + c, b = a + 1, d = a + W, e = d + 1;
+      const fa = Number.isFinite(Z[a]), fb = Number.isFinite(Z[b]), fd = Number.isFinite(Z[d]), fe = Number.isFinite(Z[e]);
+      if (fa && fb && fd) idx.push(a, d, b);
+      if (fb && fd && fe) idx.push(b, d, e);
+      else if (fa && fd && fe && !(fa && fb && fd)) idx.push(a, d, e);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geom.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geom.setIndex(new THREE.BufferAttribute(N > 65535 ? new Uint32Array(idx) : new Uint16Array(idx), 1));
+
+  // --- scene ----------------------------------------------------------------------------
   const wrap = $("three-wrap");
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(devicePixelRatio);
   wrap.append(renderer.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(getComputedStyle(document.body).getPropertyValue("--map-bg").trim() || "#111");
-  const cam = new THREE.PerspectiveCamera(55, 1, 0.5, 20000);
+  const span = Math.max(cmax - cmin + 1, rmax - rmin + 1, 10) * px;   // size of the ground itself
+  const cam = new THREE.PerspectiveCamera(50, 1, span * 0.002, span * 20);
   cam.up.set(0, 0, 1);
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  const col = new Float32Array(n * 3);
-  geom.setAttribute("color", new THREE.BufferAttribute(col, 3));
-  const mat = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true });
-  scene.add(new THREE.Points(geom, mat));
+  const surfMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geom, surfMat);
+  scene.add(mesh);
+  const ptsMat = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true });
+  const points = new THREE.Points(geom, ptsMat);
+  scene.add(points);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(-0.5, 0.8, 1.2);        // light from the north-west, like the map's shading
+  scene.add(sun);
+
   const controls = new OrbitControls(cam, renderer.domElement);
   // right button turns the view, left button moves it, wheel zooms
   controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
   controls.screenSpacePanning = false;
+  controls.enableDamping = true;
   renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-  let span = 0;
-  for (let i = 0; i < n; i++) span = Math.max(span, Math.abs(xyz[3 * i] - cx), Math.abs(xyz[3 * i + 1] - cy));
-  cam.position.set(0, -span * 1.1, span * 0.8);
-  controls.target.set(0, 0, 0);
-  controls.update();
-  const LUT = { 0: [0, 0, 0], 1: [0.35, 0.35, 0.38], 2: [0.9, 0.78, 0.35], 3: [0.9, 0.31, 0.24], 4: [0.43, 0.67, 0.35] };
+  const home = () => {
+    cam.position.set(0, -span * 0.55, span * 0.45);
+    controls.target.set(0, 0, 0);
+    controls.update();
+  };
+  home();
+
   const update = () => {
     const ex = Number($("three-exag").value);
     const byZ = $("three-color").value === "z";
-    for (let i = 0; i < n; i++) {
-      pos[3 * i] = xyz[3 * i] - cx; pos[3 * i + 1] = xyz[3 * i + 1] - cy; pos[3 * i + 2] = (xyz[3 * i + 2] - cz) * ex;
-      let c;
-      if (byZ) {
-        c = rampColor("terrain", (xyz[3 * i + 2] - zmin) / Math.max(zmax - zmin, 1e-6)).map((v) => v / 255);
-      } else c = LUT[lab[i]] || LUT[0];
-      col[3 * i] = c[0]; col[3 * i + 1] = c[1]; col[3 * i + 2] = c[2];
+    const asPoints = $("three-style").value === "points";
+    for (let r = 0; r < H; r++) {
+      for (let c = 0; c < W; c++) {
+        const i = r * W + c, z = Z[i];
+        pos[3 * i] = x0 + (c + 0.5) * px - cx;
+        pos[3 * i + 1] = y1 - (r + 0.5) * px - cy;
+        pos[3 * i + 2] = Number.isFinite(z) ? (z - zmid) * ex : 0;
+        const rgb = byZ ? rampColor("terrain", (z - zmin) / Math.max(zmax - zmin, 1e-6)) : (SURFACE_RGB[L[i]] || SURFACE_RGB[0]);
+        col[3 * i] = toLinear(rgb[0] / 255); col[3 * i + 1] = toLinear(rgb[1] / 255); col[3 * i + 2] = toLinear(rgb[2] / 255);
+      }
     }
     geom.attributes.position.needsUpdate = true;
     geom.attributes.color.needsUpdate = true;
+    geom.computeVertexNormals();
     geom.computeBoundingSphere();
-    mat.size = Number($("three-size").value);
+    mesh.visible = !asPoints;
+    points.visible = asPoints;
+    ptsMat.size = Number($("three-size").value);
+    $("three-size-wrap").hidden = !asPoints;
     const origin = S.status && S.status.origin;
     if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: "terrain", lo: zmin, hi: zmax, unit: "m",
       digits: zmax - zmin < 5 ? 2 : 1, asl: origin ? origin[2] : undefined });
@@ -671,12 +728,14 @@ async function open3D() {
       box.innerHTML = "";
       box.append(el("div", { class: "t" }, "Surface"));
       [["road", 1], ["sidewalk", 2], ["curb", 3], ["other ground", 4]].forEach(([name, k]) =>
-        box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${LUT[k].map((v) => Math.round(v * 255)).join(",")})` }), el("span", { class: "v" }, name))));
+        box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${SURFACE_RGB[k].join(",")})` }), el("span", { class: "v" }, name))));
       box.hidden = false;
     }
   };
   update();
-  ["three-color", "three-exag", "three-size"].forEach((id) => $(id).addEventListener("input", update));
+  const ids = ["three-color", "three-exag", "three-size", "three-style"];
+  ids.forEach((id) => $(id).addEventListener("input", update));
+  $("three-home").onclick = home;
   const resize = () => {
     const w = wrap.clientWidth, h = wrap.clientHeight;
     renderer.setSize(w, h); cam.aspect = w / Math.max(h, 1); cam.updateProjectionMatrix();
@@ -685,7 +744,13 @@ async function open3D() {
   const loop = () => { if (!alive) return; controls.update(); renderer.render(scene, cam); requestAnimationFrame(loop); };
   resize(); loop();
   $("three-msg").hidden = true;
-  S.three = { resize, dispose: () => { alive = false; $("three-legend").hidden = true; renderer.dispose(); renderer.domElement.remove(); } };
+  S.three = { resize, dispose: () => {
+    alive = false;
+    ids.forEach((id) => $(id).removeEventListener("input", update));
+    $("three-legend").hidden = true;
+    geom.dispose(); surfMat.dispose(); ptsMat.dispose(); controls.dispose();
+    renderer.dispose(); renderer.domElement.remove();
+  } };
 }
 
 // --- files -------------------------------------------------------------------------------

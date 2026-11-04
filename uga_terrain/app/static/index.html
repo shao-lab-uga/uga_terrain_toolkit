@@ -109,8 +109,14 @@
             <option value="label">Surface</option>
             <option value="z">Elevation</option>
           </select></label>
-        <label>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
+        <label>Show
+          <select id="three-style">
+            <option value="surface">Solid surface</option>
+            <option value="points">Points</option>
+          </select></label>
+        <label id="three-size-wrap" hidden>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
         <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" value="1"></label>
+        <button id="three-home" class="small">Reset view</button>
         <span class="muted">Right-drag to rotate, left-drag to pan, scroll to zoom.</span>
       </div>
       <div id="three-wrap" class="three-wrap"><div id="three-msg" class="empty">Open this tab after a map is built.</div><div id="three-legend" class="legend-box" hidden></div></div>

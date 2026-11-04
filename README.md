@@ -34,7 +34,7 @@ Your browser opens at http://127.0.0.1:8090. Then:
 3. Press **Build map**. Progress shows at the top, and **Stop** cancels.
 4. Look at the results:
    - **Map**: surface type, elevation, slope, roughness and intensity. Hover over a spot for its values, or click a road.
-   - **3D**: the cleaned ground point cloud.
+   - **3D**: the cleaned ground as a solid shaded surface (or as points).
    - **Road profile**: grade, banking, widths, curb heights and roughness along each road.
    - **Files**: download the outputs.
 5. After changing Settings, use **Re-run from** to redo later steps without reading the recordings again.

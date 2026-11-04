@@ -186,7 +186,9 @@ class TerrainGrid:
             a = t[layer].astype(np.float32)
             if f > 1:
                 blk = a.reshape(s, f, s, f)
-                if how == "max":
+                if how == "nearest":        # for categories (labels)
+                    a = blk[:, f // 2, :, f // 2]
+                elif how == "max":
                     with np.errstate(all="ignore"):
                         a = np.where(np.isfinite(blk).any((1, 3)),
                                      np.nanmax(np.where(np.isfinite(blk), blk, -np.inf), (1, 3)),
