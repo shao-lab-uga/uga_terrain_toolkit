@@ -114,3 +114,8 @@ code { font-size: 12px; }
   .bar { flex-basis: 100px; }
   .charts { grid-template-columns: 1fr; }
 }
+.rec-row { margin: 2px 0 4px; }
+.rec-row .row { margin: 2px 0; }
+.rec-row .pill { white-space: nowrap; }
+.range-form { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 2px 0 6px; }
+.range-form .row { gap: 4px; font-size: 12px; }

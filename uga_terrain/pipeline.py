@@ -88,8 +88,12 @@ class Project:
         summary = self.out / "summary.json"
         return {"name": self.name, "slug": self.root.name, "recordings": self.recordings,
                 "created": self.meta.get("created"), "origin": self.meta.get("origin"),
+                "ranges": [self.range_of(r) for r in self.recordings],
                 "steps": st, "built": self.meta.get("built"),
                 "summary": json.loads(summary.read_text()) if summary.is_file() else None}
+
+    def range_of(self, recording: str) -> Optional[dict]:
+        return (self.meta.get("ranges") or {}).get(str(recording))
 
     def mark(self, step: str, done: bool = True) -> None:
         f = self.root / (".done_%s" % step)
@@ -119,10 +123,38 @@ _SCAN_KEYS = ("topics", "frames", "pose", "lidar", "odometry", "ground")
 SCAN_VERSION = 2   # bump when scan output changes, so old caches are rebuilt
 
 
-def _scan_key(path: str, cfg: dict, origin) -> str:
+def clean_range(r) -> Optional[dict]:
+    """A part of a recording: {"unit": "s" | "frame", "start": a, "end": b}.
+
+    Seconds count from the first lidar scan; frames are lidar scan numbers
+    starting at 0. Either end may be None (open). None means the whole recording."""
+    if not r:
+        return None
+    unit = "frame" if str(r.get("unit")) == "frame" else "s"
+    a = r.get("start")
+    b = r.get("end")
+    a = None if a in (None, "") else float(a)
+    b = None if b in (None, "") else float(b)
+    if a is None and b is None:
+        return None
+    if a is not None and b is not None and b <= a:
+        raise ValueError("the end of the range must come after its start")
+    return {"unit": unit, "start": a, "end": b}
+
+
+def range_text(r: Optional[dict]) -> str:
+    if not r:
+        return "whole recording"
+    u = "s" if r["unit"] == "s" else ""
+    a = "start" if r["start"] is None else ("%g%s" % (r["start"], u) if u else "frame %d" % r["start"])
+    b = "end" if r["end"] is None else ("%g%s" % (r["end"], u) if u else "frame %d" % r["end"])
+    return "%s to %s" % (a, b)
+
+
+def _scan_key(path: str, cfg: dict, origin, rng: Optional[dict] = None) -> str:
     st = Path(path).stat()
     blob = json.dumps({"v": SCAN_VERSION, "p": str(path), "size": st.st_size, "mtime": int(st.st_mtime),
-                       "origin": origin, "cfg": {k: cfg.get(k) for k in _SCAN_KEYS}},
+                       "origin": origin, "range": rng, "cfg": {k: cfg.get(k) for k in _SCAN_KEYS}},
                       sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
@@ -132,7 +164,7 @@ def _rot_angle(R: np.ndarray) -> float:
 
 
 def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
-                   label: str = "") -> dict:
+                   label: str = "", rng: Optional[dict] = None) -> dict:
     topics = cfg.get("topics") or {}
     frames_cfg = cfg.get("frames") or {}
     lid = cfg.get("lidar") or {}
@@ -193,8 +225,19 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
     last_G = None
     n_seen = 0
     n_icp_reset = 0
+    t_first = None
     for t_log, _topic, msg in iter_messages(path, [lidar_topic]):
         n_seen += 1
+        if rng:
+            # only the chosen part of the recording
+            if t_first is None:
+                t_first = stamp_of(msg, t_log) if use_header else t_log
+            pos_ = (n_seen - 1) if rng["unit"] == "frame" else \
+                (stamp_of(msg, t_log) if use_header else t_log) - t_first
+            if rng["end"] is not None and pos_ > rng["end"]:
+                break
+            if rng["start"] is not None and pos_ < rng["start"]:
+                continue
         if n_seen % 10 == 0 or n_seen == 1:
             progress.set("scan lidar", n_seen, total, "%s frame %d, kept %d" % (label, n_seen, len(ts)))
         progress.check()
@@ -262,6 +305,10 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
         oks.append(ok)
         last_G = G
     if not ts:
+        if rng:
+            raise RuntimeError("%s: no usable lidar scans in %s (the recording has %d scans). "
+                               "Check the range, or the car may not move in that part."
+                               % (Path(path).name, range_text(rng), n_seen))
         raise RuntimeError("%s: no lidar frames on %s overlap the GNSS track"
                            % (Path(path).name, lidar_topic))
     t_arr = np.asarray(ts)
@@ -304,7 +351,8 @@ def step_scan(project: Project, cfg: dict, progress: Progress) -> List[dict]:
             project.meta["origin"] = origin
             project.save()
         cdir = project.cache(i)
-        key = _scan_key(path, cfg, origin)
+        rng = project.range_of(path)
+        key = _scan_key(path, cfg, origin, rng)
         meta_f = cdir / "meta.json"
         if meta_f.is_file() and (cdir / "frames.npz").is_file():
             meta = json.loads(meta_f.read_text())
@@ -314,7 +362,10 @@ def step_scan(project: Project, cfg: dict, progress: Progress) -> List[dict]:
                 continue
         cdir.mkdir(parents=True, exist_ok=True)
         label = "[%d/%d] %s" % (i + 1, len(recs), Path(path).name)
-        stats = scan_recording(path, cfg, tuple(origin), cdir, progress, label)
+        if rng:
+            progress.note("%s: mapping %s" % (Path(path).name, range_text(rng)))
+        stats = scan_recording(path, cfg, tuple(origin), cdir, progress, label, rng)
+        stats["range"] = rng
         meta_f.write_text(json.dumps({"key": key, "stats": stats}, indent=1))
         out.append(stats)
         h = stats.get("ground_height_under_car_m")

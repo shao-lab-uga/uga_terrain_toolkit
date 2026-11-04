@@ -130,7 +130,7 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         path = body.get("path")
         if not path or not Path(path).is_file():
             raise HTTPException(404, "file not found")
-        info = mcap_io.inspect(path, scan=True).to_dict()
+        info = mcap_io.inspect(path, scan=bool(body.get("scan", True))).to_dict()
         t = cfg().get("topics") or {}
         have = {x["topic"] for x in info["topics"]}
         need = {}
@@ -169,10 +169,31 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             old = p.recordings
             if recs[:len(old)] != old[:len(recs)] or len(recs) < len(old):
                 # order changed or recordings removed: cached scans no longer line up
-                import shutil
                 shutil.rmtree(p.root / "cache", ignore_errors=True)
             p.meta["recordings"] = recs
+            p.meta["ranges"] = {k: v for k, v in (p.meta.get("ranges") or {}).items() if k in recs}
             p.save()
+        if "ranges" in body:
+            # {recording path: {"unit", "start", "end"} or null}; a changed range
+            # gets a fresh scan on the next build (the cache key includes it)
+            ranges = dict(p.meta.get("ranges") or {})
+            for rec, r in (body.get("ranges") or {}).items():
+                if rec not in p.recordings:
+                    raise HTTPException(400, "%s is not in this map" % rec)
+                try:
+                    r = pipeline.clean_range(r)
+                except (TypeError, ValueError) as e:
+                    raise HTTPException(400, str(e))
+                if r != ranges.get(rec):
+                    shutil.rmtree(p.cache(p.recordings.index(rec)), ignore_errors=True)
+                if r:
+                    ranges[rec] = r
+                else:
+                    ranges.pop(rec, None)
+            p.meta["ranges"] = ranges
+            p.save()
+            for s_ in ("scan", "map", "roads", "export"):
+                p.mark(s_, False)
         return p.status()
 
     @app.get("/api/maps/{slug}")

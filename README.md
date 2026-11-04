@@ -41,6 +41,8 @@ Your browser opens at http://127.0.0.1:8090. Then:
 
 To merge more drives into an existing map, tick them and press **Add ticked recordings**, then **Build map**.
 
+**Mapping only part of a recording:** press **Part…** next to a recording in the map's panel. Enter a start and end in seconds (from the first lidar scan) or in lidar frame numbers, press **Use this part**, then **Build map**. Leave a box empty to mean the start or end of the recording. To map less of the surroundings, lower **Settings → Max ground range** (for example 15 m).
+
 **Moving around the map and 3D views:** drag with the left button to pan, hold the right button and drag to rotate, and scroll to zoom. **Fit** turns north back up. The legend shows the elevation of each colour, both relative to the start of the first drive and as GPS altitude.
 
 **Saving and sharing.** Maps save automatically. In addition:

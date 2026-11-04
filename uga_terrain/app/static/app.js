@@ -110,13 +110,59 @@ async function selectMap(slug, reload = true) {
   $("map-actions").hidden = false;
   $("map-title").textContent = st.name;
   $("map-recs").innerHTML = "";
-  st.recordings.forEach((r) => $("map-recs").append(el("div", {}, "• " + r.split("/").pop())));
+  st.recordings.forEach((r, i) => $("map-recs").append(recordingRow(st, r, (st.ranges || [])[i])));
   const steps = ["scan", "map", "roads", "export"].map((s) => (st.steps[s] ? "✓ " : "○ ") + s).join("   ");
   $("map-steps").textContent = (st.built ? "Last built " + st.built + "   " : "") + steps;
   [...$("rebuild-from").options].forEach((o) => (o.disabled = !st.can_start.includes(o.value)));
   $("btn-rebuild").disabled = st.can_start.length < 2;
   await loadSnapshots();
   if (reload) await loadResults();
+}
+
+// --- part of a recording ----------------------------------------------------------------
+function rangeText(rg) {
+  if (!rg) return "whole recording";
+  const f = (v, end) => v === null || v === undefined ? (end ? "end" : "start")
+    : rg.unit === "frame" ? `frame ${v}` : `${v} s`;
+  return `${f(rg.start, false)} to ${f(rg.end, true)}`;
+}
+function recordingRow(st, path, rg) {
+  const name = path.split("/").pop();
+  const row = el("div", { class: "rec-row" });
+  const head = el("div", { class: "row" },
+    el("span", { class: "grow", title: path }, "• " + name),
+    el("span", { class: "pill" + (rg ? " ok" : "") }, rangeText(rg)),
+    el("button", { class: "small", title: "Map only part of this recording", onclick: () => { form.hidden = !form.hidden; if (!form.hidden) guard(fillInfo)(); } }, "Part…"));
+  const unit = el("select", {}, el("option", { value: "s" }, "seconds"), el("option", { value: "frame" }, "lidar frames"));
+  const a = el("input", { type: "number", step: "any", min: "0", placeholder: "start", style: "width: 70px" });
+  const b = el("input", { type: "number", step: "any", min: "0", placeholder: "end", style: "width: 70px" });
+  if (rg) { unit.value = rg.unit; a.value = rg.start ?? ""; b.value = rg.end ?? ""; }
+  const info = el("div", { class: "muted" }, "");
+  const save = async (r) => {
+    await api(`/api/maps/${S.map}`, { method: "PUT", body: { ranges: { [path]: r } } });
+    toast(r ? `Only ${rangeText(r)} of ${name} will be mapped. Press Build map.` : `${name}: the whole recording will be mapped. Press Build map.`);
+    await loadMaps();
+  };
+  const form = el("div", { class: "range-form" },
+    el("div", { class: "row" }, "From", a, "to", b, unit),
+    info,
+    el("div", { class: "row" },
+      el("button", { class: "small primary", onclick: guard(() => save({ unit: unit.value, start: a.value === "" ? null : Number(a.value), end: b.value === "" ? null : Number(b.value) })) }, "Use this part"),
+      el("button", { class: "small", onclick: guard(() => save(null)) }, "Whole recording")));
+  form.hidden = true;
+  async function fillInfo() {
+    if (info.dataset.done) return;
+    const d = await api("/api/recordings/inspect", { method: "POST", body: { path, scan: false } });
+    const lid = (d.topics || []).find((t) => t.topic === (d.needed && d.needed.lidar && d.needed.lidar.topic));
+    const parts = [];
+    if (d.duration) parts.push(`${d.duration.toFixed(1)} s long`);
+    if (lid && lid.count) parts.push(`${lid.count} lidar frames (0 to ${lid.count - 1})`);
+    info.textContent = (parts.length ? "This recording is " + parts.join(", ") + ". " : "")
+      + "Leave a box empty for the start or end of the recording.";
+    info.dataset.done = "1";
+  }
+  row.append(head, form);
+  return row;
 }
 
 // --- snapshots, export, import ------------------------------------------------------------
@@ -263,6 +309,7 @@ async function jobFinished(j) {
   if (j.state === "done") toast("Map built.");
   else if (j.state === "error") toast("The build failed: " + j.error, true);
   await loadMaps();
+  await selectMap(S.map);       // reload the new results
 }
 $("btn-stop").addEventListener("click", guard(async () => { await api("/api/job/stop", { method: "POST" }); }));
 
