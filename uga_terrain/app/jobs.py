@@ -53,8 +53,12 @@ def _child(kind: str, cfg: dict, args: dict, q, ev, crash_log: Optional[str]) ->
             faulthandler.enable(file=f, all_threads=True)
         except OSError:
             pass
+    import uga_terrain
     from uga_terrain import pipeline
     prog = _ChildProgress(q, ev)
+    if args.get("code_root") and not uga_terrain.__file__.startswith(args["code_root"]):
+        q.put(("note", "Warning: this job loaded the code from %s, not %s. You may have two "
+                       "copies of the toolkit folder." % (uga_terrain.__file__, args["code_root"])))
     try:
         if kind == "build":
             project = pipeline.Project.open(cfg, args["name"])
@@ -95,6 +99,8 @@ class JobManager:
                         "detail": "", "log": [], "error": None, "result": None,
                         "started": time.time(), "ended": None}
             job = self.job
+        from pathlib import Path
+        args = dict(args, code_root=str(Path(__file__).resolve().parents[2]))
         threading.Thread(target=self._run, args=(job, kind, cfg, args), daemon=True).start()
         return self.snapshot()
 

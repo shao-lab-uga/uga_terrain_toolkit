@@ -494,7 +494,14 @@ def serve(host: str = "127.0.0.1", port: int = 8090) -> None:
     f.flush()
     faulthandler.enable(file=f, all_threads=True)
     serve.crash_file = f  # keep open
-    print("UGA terrain toolkit  http://%s:%d" % (host, port))
+    # jobs run in a fresh Python process; make it load this same copy of the code
+    # even when the environment was installed from another copy of the folder
+    code_root = str(Path(__file__).resolve().parents[2])
+    pp = os.environ.get("PYTHONPATH", "")
+    if code_root not in pp.split(os.pathsep):
+        os.environ["PYTHONPATH"] = code_root + (os.pathsep + pp if pp else "")
+    print("UGA terrain toolkit  http://%s:%d   (v%s)" % (host, port, __version__))
+    print("code from            %s" % code_root)
     print("recordings from      %s" % ", ".join(str(p) for p in config_mod.data_folders(c)))
     print("maps and outputs in  %s" % wd)
     print("crash log            %s" % crash)
