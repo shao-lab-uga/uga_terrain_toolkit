@@ -33,8 +33,8 @@ Your browser opens at http://127.0.0.1:8090. If an older copy of the app is stil
 2. Tick one or more recordings, type a map name, and press **Create**.
 3. Press **Build map**. Progress shows at the top, and **Stop** cancels.
 4. Look at the results:
-   - **Map**: surface type, elevation, slope, roughness and intensity. Hover over a spot for its values, or click a road.
-   - **3D**: the cleaned ground as a solid shaded surface (or as points).
+   - **Map**: shaded relief (height colours with hill shading), surface type, elevation, slope, roughness and intensity. Hover over a spot for its values, or click a road.
+   - **3D**: the cleaned ground as a lit, shadowed relief model, coloured by height or by surface type (or as points). Heights can be exaggerated so gentle slopes show.
    - **Road profile**: grade, banking, widths, curb heights and roughness along each road.
    - **Accuracy**: press **Check accuracy** to see how far the map can be trusted (see below), and look at the raw lidar points across any road, coloured by scan.
    - **Files**: download the outputs.

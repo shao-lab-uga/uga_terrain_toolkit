@@ -295,10 +295,17 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
     # --- results ------------------------------------------------------------------------
     @app.get("/api/maps/{slug}/previews")
     def previews(slug: str):
-        f = project(slug).out / "previews" / "previews.json"
+        p = project(slug)
+        f = p.out / "previews" / "previews.json"
         if not f.is_file():
             return {}
-        return json.loads(f.read_text())
+        d = json.loads(f.read_text())
+        if "relief" not in d and (p.root / "grid" / "grid.json").is_file() and not jobs.busy():
+            # map built before the shaded-relief layer existed: add it now
+            from uga_terrain import export
+            d = export.previews(grid_of(p), p.out / "previews")
+            export.save_json(d, f)
+        return d
 
     @app.get("/api/maps/{slug}/preview/{name}")
     def preview_png(slug: str, name: str):

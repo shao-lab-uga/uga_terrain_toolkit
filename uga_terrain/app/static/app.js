@@ -389,7 +389,8 @@ function drawMap() {
     const [x0, y0, x1, y1] = p.extent;
     const [a, b] = toPx(x0, y1);
     const k = S.view.s * devicePixelRatio;
-    ctx.imageSmoothingEnabled = S.view.s * (x1 - x0) / p.width < 2;
+    ctx.imageSmoothingEnabled = layer === "relief" || S.view.s * (x1 - x0) / p.width < 2;
+    ctx.imageSmoothingQuality = "high";
     ctx.save();
     ctx.translate(a, b);
     ctx.rotate(-S.view.rot);
@@ -464,8 +465,9 @@ const STOPS = {
   terrain: [[0, [40, 70, 160]], [0.25, [60, 150, 200]], [0.45, [90, 180, 110]], [0.65, [220, 210, 120]], [0.85, [170, 110, 70]], [1, [250, 250, 250]]],
   heat: [[0, [20, 40, 90]], [0.35, [40, 150, 160]], [0.65, [240, 200, 70]], [1, [220, 50, 40]]],
   gray: [[0, [20, 20, 20]], [1, [245, 245, 245]]],
+  relief: [[0, [62, 110, 70]], [0.18, [104, 150, 88]], [0.38, [168, 184, 118]], [0.55, [214, 196, 136]], [0.72, [196, 152, 104]], [0.88, [160, 128, 108]], [1, [238, 234, 228]]],
 };
-const LAYER_MAP = { elevation: "terrain", slope: "heat", roughness: "heat", intensity: "gray" };
+const LAYER_MAP = { relief: "relief", elevation: "terrain", slope: "heat", roughness: "heat", intensity: "gray" };
 function rampColor(name, f) {
   const st = STOPS[name];
   f = Math.min(Math.max(f, 0), 1);
@@ -515,7 +517,7 @@ function mapLegend(p, layer) {
     return;
   }
   const origin = S.status && S.status.origin;
-  if (layer === "elevation") {
+  if (layer === "elevation" || layer === "relief") {
     legendBox(box, { title: "Elevation", ramp, lo: p.min, hi: p.max, unit: "m",
       digits: p.max - p.min < 5 ? 2 : 1, asl: origin ? origin[2] : undefined,
       note: "Relative = height compared with where the first drive starts." });
@@ -897,10 +899,35 @@ async function open3D() {
     if (c < cmin) cmin = c; if (c > cmax) cmax = c; if (r < rmin) rmin = r; if (r > rmax) rmax = r;
   }
   const cc = cxs / nv, cr = cys / nv;
+  // lightly smoothed heights for the solid surface: lidar speckle otherwise
+  // shows as a crinkled, faceted skin (the raw heights stay in the points view)
+  const ZS = new Float32Array(N);
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+    const i = r * W + c;
+    if (!Number.isFinite(Z[i])) { ZS[i] = NaN; continue; }
+    let sum = 0, n = 0;
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const rr = r + dr, cc2 = c + dc;
+      if (rr < 0 || rr >= H || cc2 < 0 || cc2 >= W) continue;
+      const v = Z[rr * W + cc2];
+      if (Number.isFinite(v)) { const wgt = dr || dc ? 1 : 2; sum += wgt * v; n += wgt; }
+    }
+    ZS[i] = sum / n;
+  }
   const cx = x0 + (cc + 0.5) * px, cy = y1 - (cr + 0.5) * px;
 
   const pos = new Float32Array(N * 3);
   const col = new Float32Array(N * 3);
+  const uv = new Float32Array(N * 2);
+  const rp = S.previews.relief;        // shaded-relief texture and where it sits
+  if (rp) {
+    const [tx0, ty0, tx1, ty1] = rp.extent;
+    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+      const i = r * W + c;
+      uv[2 * i] = (x0 + (c + 0.5) * px - tx0) / (tx1 - tx0);
+      uv[2 * i + 1] = (y1 - (r + 0.5) * px - ty0) / (ty1 - ty0);
+    }
+  }
   const idx = [];
   for (let r = 0; r + 1 < H; r++) {
     for (let c = 0; c + 1 < W; c++) {
@@ -914,27 +941,49 @@ async function open3D() {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
   geom.setIndex(new THREE.BufferAttribute(N > 65535 ? new Uint32Array(idx) : new Uint16Array(idx), 1));
 
   // --- scene ----------------------------------------------------------------------------
   const wrap = $("three-wrap");
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(devicePixelRatio);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   wrap.append(renderer.domElement);
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(getComputedStyle(document.body).getPropertyValue("--map-bg").trim() || "#111");
+  scene.background = new THREE.Color("#cfdde6");      // pale sky, like a printed relief map
   const span = Math.max(cmax - cmin + 1, rmax - rmin + 1, 10) * px;   // size of the ground itself
   const cam = new THREE.PerspectiveCamera(50, 1, span * 0.002, span * 20);
   cam.up.set(0, 0, 1);
-  const surfMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
-  const mesh = new THREE.Mesh(geom, surfMat);
+  const surfMat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.95, metalness: 0 });
+  let reliefMat = null;
+  if (rp && rp.texture) {
+    const tex = await new THREE.TextureLoader().loadAsync(`/api/maps/${map}/preview/${rp.texture}?t=${Date.now()}`);
+    if (map !== S.map) { tex.dispose(); return; }
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    reliefMat = new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, alphaTest: 0.5 });
+  }
+  if (!reliefMat) [...$("three-color").options].forEach((o) => { if (o.value === "relief") o.disabled = true; });
+  if (!reliefMat && $("three-color").value === "relief") $("three-color").value = "label";
+  const mesh = new THREE.Mesh(geom, reliefMat || surfMat);
+  mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
   const ptsMat = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true });
   const points = new THREE.Points(geom, ptsMat);
   scene.add(points);
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-  sun.position.set(-0.5, 0.8, 1.2);        // light from the north-west, like the map's shading
+  // soft sky light plus a low, warm sun from the north-west (as on the 2D map),
+  // casting shadows so curbs and banks stand out
+  scene.add(new THREE.HemisphereLight(0xe4eef8, 0x4a4234, 0.8));
+  const sun = new THREE.DirectionalLight(0xfff1dc, 3.2);
+  sun.position.set(-0.6 * span, 0.8 * span, 0.55 * span);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(4096, 4096);
+  Object.assign(sun.shadow.camera, { left: -span, right: span, top: span, bottom: -span, near: 0.01 * span, far: 4 * span });
+  sun.shadow.camera.updateProjectionMatrix();
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.02 * px;
   scene.add(sun);
 
   const controls = new OrbitControls(cam, renderer.domElement);
@@ -952,15 +1001,17 @@ async function open3D() {
 
   const update = () => {
     const ex = Number($("three-exag").value);
-    const byZ = $("three-color").value === "z";
+    const mode = $("three-color").value;
+    const byZ = mode === "z" || mode === "relief";
     const asPoints = $("three-style").value === "points";
     for (let r = 0; r < H; r++) {
       for (let c = 0; c < W; c++) {
         const i = r * W + c, z = Z[i];
         pos[3 * i] = x0 + (c + 0.5) * px - cx;
         pos[3 * i + 1] = y1 - (r + 0.5) * px - cy;
-        pos[3 * i + 2] = Number.isFinite(z) ? (z - zmid) * ex : 0;
-        const rgb = byZ ? rampColor("terrain", (z - zmin) / Math.max(zmax - zmin, 1e-6)) : (SURFACE_RGB[L[i]] || SURFACE_RGB[0]);
+        const zz = asPoints ? z : ZS[i];
+        pos[3 * i + 2] = Number.isFinite(zz) ? (zz - zmid) * ex : 0;
+        const rgb = byZ ? rampColor(mode === "relief" ? "relief" : "terrain", (z - zmin) / Math.max(zmax - zmin, 1e-6)) : (SURFACE_RGB[L[i]] || SURFACE_RGB[0]);
         col[3 * i] = toLinear(rgb[0] / 255); col[3 * i + 1] = toLinear(rgb[1] / 255); col[3 * i + 2] = toLinear(rgb[2] / 255);
       }
     }
@@ -968,12 +1019,13 @@ async function open3D() {
     geom.attributes.color.needsUpdate = true;
     geom.computeVertexNormals();
     geom.computeBoundingSphere();
+    mesh.material = mode === "relief" && reliefMat ? reliefMat : surfMat;
     mesh.visible = !asPoints;
     points.visible = asPoints;
     ptsMat.size = Number($("three-size").value);
     $("three-size-wrap").hidden = !asPoints;
     const origin = S.status && S.status.origin;
-    if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: "terrain", lo: zmin, hi: zmax, unit: "m",
+    if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: mode === "relief" ? "relief" : "terrain", lo: zmin, hi: zmax, unit: "m",
       digits: zmax - zmin < 5 ? 2 : 1, asl: origin ? origin[2] : undefined });
     else {
       const box = $("three-legend");
@@ -1001,6 +1053,7 @@ async function open3D() {
     ids.forEach((id) => $(id).removeEventListener("input", update));
     $("three-legend").hidden = true;
     geom.dispose(); surfMat.dispose(); ptsMat.dispose(); controls.dispose();
+    if (reliefMat) { reliefMat.map.dispose(); reliefMat.dispose(); }
     renderer.dispose(); renderer.domElement.remove();
   } };
 }

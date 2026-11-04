@@ -86,6 +86,7 @@
       <div class="toolbar">
         <label>Layer
           <select id="layer">
+            <option value="relief">Shaded relief</option>
             <option value="labels">Surface (road / sidewalk)</option>
             <option value="elevation">Elevation</option>
             <option value="slope">Slope</option>
@@ -110,6 +111,7 @@
       <div class="toolbar">
         <label>Colour
           <select id="three-color">
+            <option value="relief">Relief</option>
             <option value="label">Surface</option>
             <option value="z">Elevation</option>
           </select></label>
@@ -119,7 +121,7 @@
             <option value="points">Points</option>
           </select></label>
         <label id="three-size-wrap" hidden>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
-        <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" value="1"></label>
+        <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" step="0.5" value="3"></label>
         <button id="three-home" class="small">Reset view</button>
         <span class="muted">Right-drag to rotate, left-drag to pan, scroll to zoom.</span>
       </div>

@@ -121,6 +121,71 @@ def hillshade(z: np.ndarray, cell: float, az: float = 315.0, alt: float = 45.0) 
     return np.clip(hs, 0, 1)
 
 
+# hypsometric tint for shaded relief: green lowlands, tan, brown, pale tops
+_STOPS["relief"] = [(0.0, (62, 110, 70)), (0.18, (104, 150, 88)), (0.38, (168, 184, 118)),
+                    (0.55, (214, 196, 136)), (0.72, (196, 152, 104)), (0.88, (160, 128, 108)),
+                    (1.0, (238, 234, 228))]
+
+
+def _box(a: np.ndarray, r: int, axis: int) -> np.ndarray:
+    """Running mean of width 2r+1 along one axis (edges use what is there)."""
+    if r < 1:
+        return a
+    a = np.moveaxis(a, axis, -1)
+    c = np.cumsum(np.pad(a, [(0, 0)] * (a.ndim - 1) + [(r + 1, r)], mode="edge"), axis=-1)
+    out = (c[..., 2 * r + 1:] - c[..., :-2 * r - 1]) / (2 * r + 1)
+    return np.moveaxis(out, -1, axis)
+
+
+def blur(a: np.ndarray, sigma_px: float) -> np.ndarray:
+    """Gaussian-like blur (three box passes) that ignores NaN cells."""
+    r = int(round(np.sqrt(12 * sigma_px ** 2 / 3 + 1) / 2)) if sigma_px > 0 else 0
+    if r < 1:
+        return a
+    ok = np.isfinite(a)
+    v, w = np.where(ok, a, 0.0).astype(np.float64), ok.astype(np.float64)
+    for _ in range(3):
+        for ax in (0, 1):
+            v, w = _box(v, r, ax), _box(w, r, ax)
+    with np.errstate(all="ignore"):
+        return np.where(w > 1e-6, v / w, np.nan)
+
+
+def relief(z: np.ndarray, px: float):
+    """Shaded-relief colours for a height image: (rgb with hill shading,
+    rgb with lighter shading for the 3D view where real light adds the rest, mask, lo, hi).
+    The mask has smooth edges: stray far-away specks are dropped and small
+    holes are filled, for display only."""
+    ok = np.isfinite(z)
+    cov = blur(ok.astype(np.float64), max(0.5 / px, 1.5))
+    mask = np.nan_to_num(cov) > 0.5
+    lo, hi = np.nanpercentile(z, [1, 99])
+    # fill small holes for shading, then take out lidar speckle so the
+    # shading shows the shape of the ground, not its noise
+    zf = np.where(ok, z, blur(z, max(1.0 / px, 3)))
+    zf = np.where(np.isfinite(zf), zf, np.nanmean(z))
+    zs = blur(zf, max(0.25 / px, 0.8))
+    # exaggerate gentle ground until its typical steep parts read clearly
+    gy, gx = np.gradient(zs, px)
+    g = np.hypot(gx, gy)[ok]
+    ex = float(np.clip(np.tan(np.radians(30)) / max(np.percentile(g, 95), 1e-3), 1.0, 12.0)) if g.size else 1.0
+    ze = zs * ex
+    hs = (0.55 * hillshade(ze, px, 315, 40) + 0.25 * hillshade(ze, px, 270, 50)
+          + 0.20 * hillshade(ze, px, 0, 55))
+    # ambient occlusion: hollows a little darker, ridges a little lighter
+    big = blur(zs, max(6.0 / px, 4))
+    loc = (zs - big)
+    sd = np.nanstd(loc[ok]) if ok.any() else 1.0
+    ao = np.clip(1.0 + 0.12 * loc / max(sd, 1e-6), 0.82, 1.12)
+    tint = colormap(zs, lo, hi, "relief") * ao[..., None]
+    shade = 0.42 + 0.78 * hs                        # 0.42 in full shade, 1.2 in full sun
+    rgb = tint * shade[..., None]
+    # the 3D view lights the surface itself; keep half of the fine shading in
+    # its texture so small features (curbs, gutters) still show
+    tex = tint * (0.72 + 0.4 * hs)[..., None]
+    return np.clip(rgb, 0, 255), np.clip(tex, 0, 255), mask, float(lo), float(hi)
+
+
 def previews(grid: TerrainGrid, folder: Path, max_px: int = 4096) -> Dict[str, dict]:
     """PNG preview per layer for the app, with value ranges for legends."""
     from PIL import Image
@@ -141,6 +206,14 @@ def previews(grid: TerrainGrid, folder: Path, max_px: int = 4096) -> Dict[str, d
         out[name] = meta
 
     if ok.any():
+        rel, tint, rmask, rlo, rhi = relief(z, px)
+        save("relief", rel, {"_mask": rmask, "min": rlo, "max": rhi, "unit": "m",
+                             "label": "Shaded relief"})
+        a = np.zeros(z.shape + (4,), np.uint8)     # texture for the 3D view
+        a[..., :3] = np.nan_to_num(tint).astype(np.uint8)
+        a[..., 3] = np.where(rmask, 255, 0)
+        Image.fromarray(a, "RGBA").save(folder / "relief_tint.png", optimize=True)
+        out["relief"]["texture"] = "relief_tint.png"
         lo, hi = np.nanpercentile(z, [1, 99])
         hs = hillshade(z, px)
         rgb = colormap(z, lo, hi, "terrain") * (0.45 + 0.55 * hs[..., None])
