@@ -56,6 +56,10 @@ def _child(kind: str, cfg: dict, args: dict, q, ev, crash_log: Optional[str]) ->
     import uga_terrain
     from uga_terrain import pipeline
     prog = _ChildProgress(q, ev)
+    from uga_terrain import cpus
+    msg = cpus.apply((cfg.get("app") or {}).get("cpus"))   # read again: Settings may have changed
+    if msg:
+        prog.note(msg)
     if args.get("code_root") and not uga_terrain.__file__.startswith(args["code_root"]):
         q.put(("note", "Warning: this job loaded the code from %s, not %s. You may have two "
                        "copies of the toolkit folder." % (uga_terrain.__file__, args["code_root"])))

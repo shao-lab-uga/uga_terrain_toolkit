@@ -99,6 +99,10 @@ python -m uga_terrain build --name campus --start roads     # redo roads + expor
 
 All tuning values are in `configs/default.yaml`. Changes made in the app go to `configs/local.yaml`.
 
+## Random errors on Intel 13th/14th-gen CPUs
+
+Some i7/i9 13th and 14th-gen CPUs were damaged by a voltage fault and give random, different errors on every build, even with Intel's microcode fix. If that happens, set **Settings > CPU cores to use** to **e-cores**. The app then runs only on the slower efficiency cores, which are not affected. Builds are slower, and nothing else changes. Set it back to **all** once the CPU is replaced.
+
 ## Accuracy check
 
 There is no surveyed ground truth, so the check compares the recordings with themselves:

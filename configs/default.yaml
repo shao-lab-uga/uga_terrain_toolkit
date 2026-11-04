@@ -9,6 +9,7 @@ app:
   host: 127.0.0.1
   port: 8090
   open_browser: true
+  cpus: all          # all | e-cores (Intel 13th/14th-gen CPUs with the P-core fault) | e.g. 16-31
 
 topics:
   lidar: /lidar/points

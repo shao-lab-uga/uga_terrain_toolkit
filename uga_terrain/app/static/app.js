@@ -1025,6 +1025,7 @@ const FIELDS = [
   ["Where things are", [
     ["data_folders", "Recording folders", "list", "One folder per line; .mcap files inside (and in sub-folders) show up on the left."],
     ["work_dir", "Work folder", "text", "Maps, caches and output files go here."],
+    ["app.cpus", "CPU cores to use", ["all", "e-cores"], "e-cores: only the slower efficiency cores. Use it on an Intel 13th/14th-gen CPU that gives random errors on the fast P-cores. Applies to the next build."],
   ]],
   ["Topics and frames", [
     ["topics.lidar", "Lidar topic", "text"], ["topics.navsat", "GNSS topic (NavSatFix)", "text"],
