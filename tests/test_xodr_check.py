@@ -97,3 +97,13 @@ def test_replay_finds_lane_and_direction(tmp_path):
     o = X.check(xo, [tr])
     assert o["replay"][0]["wrong_way_pct"] == 100
     assert "replay_direction" in {f["code"] for f in o["findings"]}
+
+
+def test_lane_geometry_for_the_map(tmp_path):
+    g = X.lane_geometry(_write(tmp_path, GOOD))
+    drv = [l for l in g["lanes"] if l["type"] == "driving"]
+    assert {(l["road"], l["lane"]) for l in drv} == {("1", 1), ("1", -1), ("2", -1)}
+    assert any(l["junction"] for l in drv) and len(g["centre"]) == 2
+    # lane -1 of road 1 lies 3.5 m right of the centre line (y = 0 .. -3.5)
+    l = next(l for l in drv if l["road"] == "1" and l["lane"] == -1)
+    assert abs(l["outer"][0][1] + 3.5) < 1e-6 and abs(l["inner"][0][1]) < 1e-6

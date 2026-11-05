@@ -815,6 +815,48 @@ def check_lane_joins(roads: List[Road], juncs: List[Junction], rep: Report) -> N
                     "where the roads join" % (lid, oid, other, d), rid)
 
 
+def lane_geometry(path, step: float = 1.0) -> dict:
+    """Lanes and centre lines of an .xodr as polylines, for drawing.
+
+    lanes: [{road, lane, type, junction, inner: [[x, y]...], outer: [...]}]
+    centre: [{road, junction, mark, line: [[x, y]...]}] (the boundary between
+    the two directions, i.e. lane 0 shifted by laneOffset)."""
+    _root, roads, juncs = read(path)
+    root = _root
+    marks = {}
+    for re_ in root.findall("road"):
+        c = re_.find(".//center/lane/roadMark")
+        marks[re_.get("id")] = c.get("type") if c is not None else "none"
+    lanes, centre = [], []
+    for r in roads:
+        ref = reference(r)
+        if len(ref) < 2:
+            continue
+        ss_all = np.unique(np.concatenate([np.arange(0.0, r.length, step), [r.length]]))
+        jn = r.junction not in ("-1", None)
+        for k, sec in enumerate(r.sections):
+            ss = ss_all[(ss_all >= sec.s - 1e-9) & (ss_all <= sec.s_end + 1e-9)]
+            if len(ss) < 2:
+                continue
+            x = np.interp(ss, ref[:, 0], ref[:, 1])
+            y = np.interp(ss, ref[:, 0], ref[:, 2])
+            h = np.interp(ss, ref[:, 0], np.unwrap(ref[:, 3]))
+            nx, ny = -np.sin(h), np.cos(h)
+            b = lane_bounds(r, sec, ss)
+
+            def pts(t):
+                return np.round(np.stack([x + t * nx, y + t * ny], 1), 3).tolist()
+            t0 = _eval(r.lane_offset, ss)
+            centre.append({"road": r.id, "junction": jn, "mark": marks.get(r.id, "none"), "line": pts(t0)})
+            for lid, (ti, to) in b.items():
+                ln = sec.lanes[lid]
+                if np.max(np.abs(to - ti)) < 0.05:
+                    continue
+                lanes.append({"road": r.id, "lane": lid, "type": ln.type, "junction": jn,
+                              "name": r.name, "inner": pts(ti), "outer": pts(to)})
+    return {"lanes": lanes, "centre": centre, "junctions": [j.id for j in juncs]}
+
+
 # --- entry point --------------------------------------------------------------------
 
 def check(xodr_path, trajectories: Sequence = (), left_hand: bool = False) -> dict:

@@ -277,6 +277,19 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             export.save_json(xodr_check.check(xs[0], [tr] if tr.is_file() else []), f)
         return Response(f.read_text(), media_type="application/json")
 
+    @app.get("/api/maps/{slug}/lanes")
+    def lanes_geometry(slug: str):
+        """Lanes, connecting lanes and centre lines of the exported .xodr, for the map."""
+        from uga_terrain import export, xodr_check
+        p = project(slug)
+        xs = sorted(p.out.glob("*.xodr")) if p.out.is_dir() else []
+        if not xs:
+            return Response("null", media_type="application/json")
+        f = p.out / "lanes_geometry.json"
+        if not f.is_file() or f.stat().st_mtime < xs[0].stat().st_mtime:
+            export.save_json(xodr_check.lane_geometry(xs[0]), f)
+        return Response(f.read_text(), media_type="application/json")
+
     @app.get("/api/maps/{slug}/section")
     def road_section(slug: str, road: int, s: float, half_width: float = Query(15.0, ge=2, le=40)):
         """Raw ground points of every scan in a thin slice across a road."""

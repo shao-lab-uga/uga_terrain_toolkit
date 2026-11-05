@@ -119,7 +119,7 @@ Some i7/i9 13th and 14th-gen CPUs were damaged by a voltage fault and give rando
 - **Lane links:** linked lanes really meet where their roads join (no gap between a lane and the connecting lane it links to).
 - **Replay:** each recording's trajectory is placed onto the map lane by lane, following the map's lane links through junctions: share of poses inside a driving lane, the route of lanes used, lane changes, moves between lanes the map does not connect, distance from the lane centre, heading against the lane direction, and vehicle height against the road surface.
 
-Results are in `xodr_check.json` and on the **Accuracy** tab. Any .xodr can be checked from the command line, with any trajectory in the map's x/y frame:
+Results are in `xodr_check.json` and on the **Accuracy** tab. The **Map** tab draws the lanes from the .xodr (blue along the road, green the other way, orange the connecting lanes through junctions, yellow dashes the centre line; checkbox **Lanes**). Any .xodr can be checked from the command line, with any trajectory in the map's x/y frame:
 
 ```bash
 python -m uga_terrain check map.xodr --trajectory trajectory.csv

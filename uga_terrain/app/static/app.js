@@ -227,13 +227,14 @@ $("import-file").addEventListener("change", guard(async (e) => {
 }));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
-  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.road = null;
+  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null;
   if (S.three) { S.three.dispose(); S.three = null; }
   if (S.summary) {
     S.previews = await api(`/api/maps/${S.map}/previews`);
     S.roads = await api(`/api/maps/${S.map}/roads`);
     S.drives = await api(`/api/maps/${S.map}/drives`);
     S.junctions = (await api(`/api/maps/${S.map}/junctions`)) || [];
+    S.lanes = await api(`/api/maps/${S.map}/lanes`);
     if (S.roads.length) S.road = S.roads[0].id;
   }
   S.view = null;
@@ -398,6 +399,7 @@ function drawMap() {
     ctx.drawImage(img, 0, 0, (x1 - x0) * k, (y1 - y0) * k);
     ctx.restore();
   }
+  if ($("show-lanes").checked && S.lanes) drawLanes();
   if ($("show-drives").checked) {
     ctx.lineWidth = 1.5 * devicePixelRatio;
     ctx.strokeStyle = "rgba(43,108,176,.9)";
@@ -420,10 +422,14 @@ function drawMap() {
       ctx.fillStyle = "#b35f00";
       ctx.fillText(`Junction ${j.id}`, cx + 6, cy);
     }
+    const lanesShown = $("show-lanes").checked && S.lanes && S.lanes.lanes.length;
     for (const r of S.roads) {
-      ctx.lineWidth = (r.id === S.road ? 4 : 2.5) * devicePixelRatio;
-      ctx.strokeStyle = r.id === S.road ? "#b5121b" : "rgba(181,18,27,.6)";
-      polyline(r.x, r.y);
+      // with lanes on, the red driven-path line is drawn only for the selected road
+      if (!lanesShown || r.id === S.road) {
+        ctx.lineWidth = (r.id === S.road ? (lanesShown ? 2 : 4) : 2.5) * devicePixelRatio;
+        ctx.strokeStyle = r.id === S.road ? "#b5121b" : "rgba(181,18,27,.6)";
+        polyline(r.x, r.y);
+      }
       const m = Math.floor(r.x.length / 2);
       const [px, py] = toPx(r.x[m], r.y[m]);
       ctx.font = `600 ${12 * devicePixelRatio}px system-ui`;
@@ -436,6 +442,42 @@ function drawMap() {
   scaleBar();
   northArrow();
   mapLegend(p, layer);
+}
+// lanes from the exported .xodr: filled strips, edges, and the centre line
+function drawLanes() {
+  const dpr = devicePixelRatio;
+  const col = (l) => l.type === "sidewalk" ? [150, 150, 150] : l.type !== "driving" ? null
+    : l.junction ? [230, 130, 0] : l.lane < 0 ? [31, 119, 255] : [44, 160, 44];
+  const path = (pts, move = true) => {
+    pts.forEach(([x, y], i) => { const [px, py] = toPx(x, y); (i === 0 && move) ? ctx.moveTo(px, py) : ctx.lineTo(px, py); });
+  };
+  for (const pass of [false, true]) {               // roads first, junction lanes on top
+    for (const l of S.lanes.lanes) {
+      if (l.junction !== pass) continue;
+      const c = col(l);
+      if (!c) continue;
+      ctx.beginPath();
+      path(l.inner);
+      path([...l.outer].reverse(), false);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${c},${l.junction ? 0.16 : l.type === "sidewalk" ? 0.25 : 0.33})`;
+      ctx.fill();
+      ctx.beginPath();
+      path(l.outer);
+      ctx.lineWidth = 1 * dpr;
+      ctx.strokeStyle = `rgba(${c},.95)`;
+      ctx.stroke();
+    }
+  }
+  ctx.setLineDash([7 * dpr, 5 * dpr]);
+  for (const c of S.lanes.centre) {
+    ctx.beginPath();
+    path(c.line);
+    ctx.lineWidth = (c.junction ? 1 : 1.8) * dpr;
+    ctx.strokeStyle = c.junction ? "rgba(230,130,0,.9)" : "#f2c200";
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
 }
 function northArrow() {
   const d = devicePixelRatio, R = 26 * d, r = 12 * d, x = 38 * d, y = 38 * d;
@@ -528,6 +570,7 @@ function mapLegend(p, layer) {
       box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${c.rgb.join(",")})` }), el("span", { class: "v" }, c.name)));
     }
     box.append(el("div", { class: "note" }, "Switch Layer to Elevation for heights."));
+    lanesLegend(box);
     box.hidden = false;
     return;
   }
@@ -539,6 +582,17 @@ function mapLegend(p, layer) {
   } else if (layer === "slope") legendBox(box, { title: "Slope", ramp, lo: p.min, hi: p.max, unit: "°", digits: 0 });
   else if (layer === "roughness") legendBox(box, { title: "Roughness (RMS)", ramp, lo: 0, hi: 6, unit: "cm", digits: 1 });
   else legendBox(box, { title: "Lidar intensity", ramp, lo: p.min, hi: p.max, unit: "", digits: 0 });
+  lanesLegend(box);
+}
+function lanesLegend(box) {
+  if (!$("show-lanes").checked || !S.lanes || !S.lanes.lanes.length) return;
+  box.append(el("div", { class: "t", style: "margin-top: 8px" }, "Lanes (OpenDRIVE)"));
+  const row = (style, text) => box.append(el("div", { class: "st" }, el("span", { class: "sw", style }), el("span", { class: "v" }, text)));
+  row("background: rgba(31,119,255,.55)", "driving, along the road");
+  row("background: rgba(44,160,44,.55)", "driving, the other way");
+  row("background: rgba(230,130,0,.45)", "connecting lane in a junction");
+  row("background: transparent; border-top: 2px dashed #f2c200; height: 0; margin-top: 7px", "centre line");
+  row("background: #b5121b; height: 3px; margin-top: 6px", "driven path of the selected road");
 }
 let drag = null;
 const centreAngle = (x, y) => Math.atan2(y - cv.clientHeight / 2, x - cv.clientWidth / 2);
@@ -604,7 +658,7 @@ function pickRoad(px, py) {
   }
   if (best !== null) { S.road = best; $("road-select").value = best; drawMap(); drawProfile(); toast(`${roadName(best)} selected; see the Road profile tab.`); }
 }
-["layer", "show-roads", "show-drives", "show-legend"].forEach((id) => $(id).addEventListener("change", drawMap));
+["layer", "show-lanes", "show-roads", "show-drives", "show-legend"].forEach((id) => $(id).addEventListener("change", drawMap));
 $("btn-fit").addEventListener("click", () => { S.view = null; drawMap(); });
 window.addEventListener("resize", () => { drawMap(); drawProfile(); if (S.three) S.three.resize(); });
 
