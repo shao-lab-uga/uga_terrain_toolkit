@@ -174,7 +174,49 @@ def on_centre_line(road: Road) -> Road:
     return Road(road.id, road.source, s + road.s[0], x, y, h, nd, dict(road.meta))
 
 
-def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = ""):
+ROAD_TYPES = ("town", "rural", "motorway", "lowSpeed", "pedestrian", "bicycle")
+LANE_TYPES = ("driving", "shoulder", "parking", "biking", "sidewalk", "border", "restricted", "median", "none")
+
+
+def road_details(cfg: dict, edits: Optional[dict], road_id) -> dict:
+    """Type, speed limit, one-way and lane changes for one road: the config's
+    defaults with the map's own edits on top."""
+    d = dict((cfg.get("xodr") or {}).get("road_defaults") or {})
+    d.setdefault("type", "town")
+    d.setdefault("speed", None)
+    d.setdefault("unit", "mph")
+    d.setdefault("one_way", "no")
+    d.update(((edits or {}).get("roads") or {}).get(str(road_id)) or {})
+    return d
+
+
+def _type_element(r, det: dict):
+    t = ET.SubElement(r, "type", s="0", type=det.get("type") if det.get("type") in ROAD_TYPES else "town")
+    if det.get("speed"):
+        unit = det.get("unit") if det.get("unit") in ("mph", "km/h", "m/s") else "mph"
+        ET.SubElement(t, "speed", max=_f(float(det["speed"])), unit=unit)
+    return t
+
+
+def _one_way(per_side: dict, offset: np.ndarray, how: str):
+    """All driving lanes in one direction: along the road ("forward", right
+    lanes) or against it ("backward", left lanes). The centre line moves to
+    the edge of the lanes, so no lane changes place on the ground."""
+    if how == "forward" and per_side["l"]:
+        moved = per_side["l"]
+        per_side["r"] = list(reversed(moved)) + per_side["r"]
+        offset = offset + sum(w for _, w, _ in moved)
+        per_side["l"] = []
+    elif how == "backward" and per_side["r"]:
+        moved = per_side["r"]
+        per_side["l"] = list(reversed(moved)) + per_side["l"]
+        offset = offset - sum(w for _, w, _ in moved)
+        per_side["r"] = []
+    return per_side, offset
+
+
+def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = "",
+                 details: Optional[dict] = None):
     xc = cfg.get("xodr") or {}
     rc = cfg.get("roads") or {}
     seg = float(xc.get("segment_len") or 20.0)
@@ -194,7 +236,8 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
     r = ET.SubElement(root, "road", name=road_name or "road_%d" % road.id, length=_f(Lg),
                       id=str(road.id), junction="-1")
     ET.SubElement(r, "link")
-    ET.SubElement(r, "type", s="0", type="town")
+    det = details or road_details(cfg, None, road.id)
+    _type_element(r, det)
     pv = ET.SubElement(r, "planView")
     for (s0, x0, y0, h, L, U, V) in geoms:
         g = ET.SubElement(pv, "geometry", s=_f(s0), x=_f(x0), y=_f(y0), hdg=_f(h), length=_f(L))
@@ -238,6 +281,11 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         per_side = {side: [("driving", w_lane, ("solid", "white") if k == n_side - 1 else ("broken", "white"))
                            for k in range(n_side)] for side, n_side in (("l", n_l), ("r", n_r))}
         centre_mark = "solid" if n_l else None
+    if det.get("one_way") in ("forward", "backward"):
+        per_side, offset = _one_way(per_side, offset, det["one_way"])
+        centre_mark = None
+        n_l = len(per_side["l"])
+    lane_edits = det.get("lanes") or {}
     if np.max(np.abs(offset)) > 1e-3:
         for (s0, a, b, c_, dd) in linear(knots, offset):
             ET.SubElement(lanes, "laneOffset", s=_f(s0), a=_f(a), b=_f(b), c=_f(c_), d=_f(dd))
@@ -249,6 +297,11 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         lid = 0
         for ltype, widths, mark in per_side[side]:
             lid += sign
+            ed = lane_edits.get(str(lid)) or {}
+            if ed.get("type") in LANE_TYPES:
+                ltype = ed["type"]
+            if ed.get("width") not in (None, ""):
+                widths = np.full(len(knots), float(ed["width"]))
             _lane(parent, lid, ltype, knots, np.maximum(widths, 0.0), mark=mark)
         curb = np.abs(at("curb_h_" + side))
         verge = at("verge_" + side)
@@ -278,12 +331,58 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
     # put <center> between <left> and <right>
     sec.remove(centre)
     sec.insert(1, centre)
+    add_markings(r, road, geoms)
     return r
+
+
+def add_markings(r, road: Road, geoms) -> int:
+    """Stop lines and crosswalks (``road.meta["markings"]``, world polygons) as
+    <object> records placed on the road's reference line."""
+    marks = (road.meta or {}).get("markings") or []
+    if not marks:
+        return 0
+    n_per = 200
+    pts = eval_param_poly3(geoms, n_per=n_per)
+    s_pts = np.concatenate([np.linspace(g[0], g[0] + g[4], n_per) for g in geoms])
+    hd = np.unwrap(np.arctan2(np.gradient(pts[:, 1]), np.gradient(pts[:, 0])))
+    L = float(sum(g[4] for g in geoms))
+    objs = ET.SubElement(r, "objects")
+    for k, m in enumerate(marks):
+        P = np.asarray(m["polygon"], float)
+        c = P.mean(0)
+        i = int(np.argmin(np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])))
+        s0, h = float(np.clip(s_pts[i], 0.0, L)), float(hd[i])
+        nx, ny = -math.sin(h), math.cos(h)
+        t0 = float((c[0] - pts[i, 0]) * nx + (c[1] - pts[i, 1]) * ny)
+        # object frame: at (s, t), u along the road
+        ox, oy = pts[i, 0] + t0 * nx, pts[i, 1] + t0 * ny
+        uv = [((px - ox) * math.cos(h) + (py - oy) * math.sin(h),
+               -(px - ox) * math.sin(h) + (py - oy) * math.cos(h)) for px, py in P]
+        us, vs = [a for a, _ in uv], [b for _, b in uv]
+        crosswalk = m["kind"] == "crosswalk"
+        o = ET.SubElement(objs, "object", id=str(road.id * 100 + k),
+                          type="crosswalk" if crosswalk else "roadMark",
+                          subtype="" if crosswalk else "stopLine",
+                          name="crosswalk" if crosswalk else "stop line",
+                          s=_f(s0), t=_f(t0), zOffset="0", hdg="0", pitch="0", roll="0",
+                          orientation="none", length=_f(max(us) - min(us)), width=_f(max(vs) - min(vs)),
+                          height="0", validLength="0")
+        if not o.get("subtype"):
+            del o.attrib["subtype"]
+        ol = ET.SubElement(ET.SubElement(o, "outlines"), "outline", id="0", closed="true",
+                           fillType="paint", outer="true", laneType="driving")
+        for a, b in uv:
+            ET.SubElement(ol, "cornerLocal", u=_f(a), v=_f(b), z="0", height="0")
+    return len(marks)
 
 
 def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cfg: dict,
                path, name: str = "uga_terrain", road_names: Optional[dict] = None,
-               junctions: Sequence = (), ground=None) -> dict:
+               junctions: Sequence = (), ground=None, edits: Optional[dict] = None) -> dict:
+    """``edits``: the map's own changes (see ``road_details``), plus
+    "removed_roads" (ids) and "removed_turns" ("road:lane>road:lane")."""
+    removed = {int(v) for v in (edits or {}).get("removed_roads") or []}
+    roads = [r for r in roads if r.id not in removed]
     xc = cfg.get("xodr") or {}
     z_off = 0.0 if xc.get("relative_elevation", True) else float(origin_lla[2])
     root = ET.Element("OpenDRIVE")
@@ -299,14 +398,17 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
                 "+units=m +no_defs" % (origin_lla[0], origin_lla[1]))
     ET.SubElement(hdr, "userData", code="origin_altitude_m", value=_f(origin_lla[2]))
     for road in roads:
-        road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""))
+        road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""),
+                     details=road_details(cfg, edits, road.id))
     jinfo = {"junctions": [], "connecting_roads": 0}
     if junctions:
         from uga_terrain import junctions as junctions_mod
         ends = {r.id: {"start": r.meta.get("junction_start"), "end": r.meta.get("junction_end")}
                 for r in roads}
         jinfo = junctions_mod.add_to_xodr(root, junctions, ends, cfg,
-                                          next_id=max([r.id for r in roads] + [0]), ground=ground, z_off=z_off)
+                                          next_id=max([r.id for r in roads] + [0]), ground=ground, z_off=z_off,
+                                          removed_turns=set((edits or {}).get("removed_turns") or []),
+                                          details=lambda rid: road_details(cfg, edits, rid))
     # OpenDRIVE wants junctions after all roads
     for je in root.findall("junction"):
         root.remove(je)

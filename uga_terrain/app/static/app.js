@@ -227,7 +227,7 @@ $("import-file").addEventListener("change", guard(async (e) => {
 }));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
-  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null;
+  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null; S.ed = null; S.edits = null; S.pick = null;
   if (S.three) { S.three.dispose(); S.three = null; }
   if (S.summary) {
     S.previews = await api(`/api/maps/${S.map}/previews`);
@@ -235,6 +235,8 @@ async function loadResults() {
     S.drives = await api(`/api/maps/${S.map}/drives`);
     S.junctions = (await api(`/api/maps/${S.map}/junctions`)) || [];
     S.lanes = await api(`/api/maps/${S.map}/lanes`);
+    S.ed = await api(`/api/maps/${S.map}/edits`);
+    S.edits = JSON.parse(JSON.stringify(S.ed.edits)); S.dirty = false; S.pick = null;
     if (S.roads.length) S.road = S.roads[0].id;
   }
   S.view = null;
@@ -414,7 +416,12 @@ function drawMap() {
       ctx.lineWidth = 2 * devicePixelRatio;
       ctx.strokeStyle = "rgba(214,120,0,.9)";
       ctx.setLineDash([6 * devicePixelRatio, 4 * devicePixelRatio]);
-      ctx.beginPath(); ctx.arc(cx, cy, Math.hypot(ex - cx, ey - cy), 0, 2 * Math.PI); ctx.stroke();
+      ctx.beginPath();
+      if (j.outline && j.outline.length > 2) {          // edge fitted to the curbs
+        j.outline.forEach(([x, y], k) => { const [px, py] = toPx(x, y); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+        ctx.closePath();
+      } else ctx.arc(cx, cy, Math.hypot(ex - cx, ey - cy), 0, 2 * Math.PI);
+      ctx.stroke();
       ctx.setLineDash([]);
       ctx.font = `600 ${12 * devicePixelRatio}px system-ui`;
       ctx.lineWidth = 3 * devicePixelRatio; ctx.strokeStyle = "rgba(255,255,255,.9)";
@@ -478,6 +485,33 @@ function drawLanes() {
     ctx.stroke();
   }
   ctx.setLineDash([]);
+  if (S.pick && S.pick.lane) {
+    const l = S.pick.lane;
+    ctx.beginPath(); path(l.inner); path([...l.outer].reverse(), false); ctx.closePath();
+    ctx.lineWidth = 3 * dpr; ctx.strokeStyle = "#b5121b"; ctx.stroke();
+  }
+  // crosswalks (white bars) and stop lines (solid white) from the .xodr objects
+  for (const m of S.lanes.markings || []) {
+    const P = m.polygon.map(([x, y]) => toPx(x, y));
+    ctx.beginPath(); P.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    if (m.type === "crosswalk") {
+      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fill();
+      ctx.save(); ctx.clip();
+      // bars along the crossing direction (the polygon's long sides are 0-1 and 2-3)
+      const [a, b, c] = P, len = Math.hypot(c[0] - b[0], c[1] - b[1]), n = Math.max(2, Math.round(len / (1.2 * S.view.s * dpr)));
+      ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.lineWidth = Math.max(1, 0.5 * S.view.s * dpr);
+      for (let k = 0; k <= n; k++) {
+        const f = k / n, p = [b[0] + (c[0] - b[0]) * f, b[1] + (c[1] - b[1]) * f], q = [a[0] + (P[3][0] - a[0]) * f, a[1] + (P[3][1] - a[1]) * f];
+        ctx.beginPath(); ctx.moveTo(...p); ctx.lineTo(...q); ctx.stroke();
+      }
+      ctx.restore();
+      ctx.beginPath(); P.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+      ctx.strokeStyle = "rgba(60,60,60,.8)"; ctx.lineWidth = 1 * dpr; ctx.stroke();
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,.95)"; ctx.fill();
+      ctx.strokeStyle = "rgba(60,60,60,.9)"; ctx.lineWidth = 1 * dpr; ctx.stroke();
+    }
+  }
 }
 function northArrow() {
   const d = devicePixelRatio, R = 26 * d, r = 12 * d, x = 38 * d, y = 38 * d;
@@ -592,6 +626,10 @@ function lanesLegend(box) {
   row("background: rgba(44,160,44,.55)", "driving, the other way");
   row("background: rgba(230,130,0,.45)", "connecting lane in a junction");
   row("background: transparent; border-top: 2px dashed #f2c200; height: 0; margin-top: 7px", "centre line");
+  if ((S.lanes.markings || []).length) {
+    row("background: repeating-linear-gradient(90deg, #fff 0 3px, #bbb 3px 6px); border: 1px solid #555", "crosswalk");
+    row("background: #fff; border: 1px solid #555; height: 4px; margin-top: 5px", "stop line");
+  }
   row("background: #b5121b; height: 3px; margin-top: 6px", "driven path of the selected road");
 }
 let drag = null;
@@ -605,7 +643,7 @@ cv.addEventListener("mousedown", (e) => {
   cv.style.cursor = drag.rotate ? "alias" : "grabbing";
 });
 window.addEventListener("mouseup", (e) => {
-  if (drag && !drag.moved && !drag.rotate && e.target === cv) pickRoad(e.offsetX, e.offsetY);
+  if (drag && !drag.moved && !drag.rotate && e.target === cv && !pickLane(e.offsetX, e.offsetY)) pickRoad(e.offsetX, e.offsetY);
   drag = null;
   cv.style.cursor = "";
 });
@@ -646,6 +684,128 @@ function hover(px, py) {
       : `x ${x.toFixed(1)}  y ${y.toFixed(1)} m   ${v.surface}${v.filled ? " (filled gap)" : ""}\n`
         + `elevation ${fmt(v.z, 2)} m   slope ${fmt(v.slope_deg, 1)}°   roughness ${fmt(100 * v.roughness, 1)} cm`;
   }), 120);
+}
+// --- lane editor -------------------------------------------------------------------------
+function inPoly(x, y, P) {
+  let ins = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const [xi, yi] = P[i], [xj, yj] = P[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) ins = !ins;
+  }
+  return ins;
+}
+function laneAt(x, y) {
+  if (!S.lanes || !$("show-lanes").checked) return null;
+  const hits = S.lanes.lanes.filter((l) => l.type !== "sidewalk" && inPoly(x, y, [...l.inner, ...[...l.outer].reverse()]));
+  if (!hits.length) return null;
+  // junction lanes overlap: take the one whose middle is nearest
+  const mid = (l) => {
+    let bd = Infinity;
+    for (let i = 0; i < l.inner.length; i++) {
+      const mx = (l.inner[i][0] + l.outer[i][0]) / 2, my = (l.inner[i][1] + l.outer[i][1]) / 2;
+      bd = Math.min(bd, Math.hypot(mx - x, my - y));
+    }
+    return bd;
+  };
+  const plain = hits.filter((l) => !l.junction);
+  return (plain.length ? plain : hits).sort((a, b) => mid(a) - mid(b))[0];
+}
+function turnKey(l) {
+  const m = /(?:turn|from) (\d+) lane (-?\d+) to (\d+) lane (-?\d+)/.exec(l.name || "");
+  return m ? `${m[1]}:${m[2]}>${m[3]}:${m[4]}` : null;
+}
+function pickLane(px, py) {
+  if (!S.ed) return false;
+  const [x, y] = toW(px, py);
+  const l = laneAt(x, y);
+  if (!l) return false;
+  S.pick = { lane: l };
+  if (!l.junction) { S.road = Number(l.road); $("road-select").value = S.road; }
+  drawMap(); editorPanel();
+  return true;
+}
+function roadEdit(rid) {
+  S.edits.roads[rid] = S.edits.roads[rid] || {};
+  return S.edits.roads[rid];
+}
+function detailsOf(rid) {
+  return Object.assign({}, S.ed.defaults, S.edits.roads[rid] || {});
+}
+function changed() { S.dirty = true; editorPanel(); }
+function editorPanel() {
+  const box = $("lane-editor");
+  if (!S.ed || (!S.pick && !S.dirty)) { box.hidden = true; return; }
+  box.innerHTML = "";
+  box.append(el("button", { class: "x", title: "Close", onclick: () => { S.pick = null; drawMap(); editorPanel(); } }, "\u00d7"));
+  const l = S.pick && S.pick.lane;
+  const sel = (opts, val, on) => {
+    const s = el("select", { onchange: (e) => on(e.target.value) });
+    for (const [v, t] of opts) s.append(el("option", { value: v }, t));
+    s.value = val;
+    return s;
+  };
+  if (l && l.junction) {
+    const key = turnKey(l);
+    box.append(el("h3", {}, "Turn through the junction"), el("div", { class: "sub" }, l.name));
+    const g = el("div", { class: "grp" });
+    g.append(el("div", {}, "If this turn is not allowed here (a no-left-turn sign, a one-way street), remove it. Cars in CARLA will then never make it."));
+    if (key) g.append(el("div", { class: "row" }, el("button", { onclick: () => {
+      S.edits.removed_turns = [...new Set([...(S.edits.removed_turns || []), key])]; S.pick = null; changed(); } }, "Remove this turn")));
+    box.append(g);
+  } else if (l) {
+    const rid = String(l.road), d = detailsOf(rid), info = (S.ed.roads || []).find((r) => String(r.id) === rid) || {};
+    box.append(el("h3", {}, `${roadName(Number(rid))}, lane ${l.lane}`),
+      el("div", { class: "sub" }, `${l.lane < 0 ? "along the road" : "the other way"}${info.stub ? " \u00b7 a street nobody drove (its shape is a guess from the curbs)" : ""}`));
+    const g = el("div", { class: "grp" }, el("div", { class: "t" }, "Road"));
+    g.append(el("label", {}, "Type", sel(S.ed.road_types.map((t) => [t, t]), d.type, (v) => { roadEdit(rid).type = v; changed(); })));
+    const sp = el("input", { type: "number", min: "0", step: "5", value: d.speed ?? "", placeholder: "none",
+      onchange: (e) => { roadEdit(rid).speed = e.target.value === "" ? null : Number(e.target.value); changed(); } });
+    g.append(el("label", {}, "Speed limit", el("span", {}, sp, " ",
+      sel([["mph", "mph"], ["km/h", "km/h"]], d.unit || "mph", (v) => { roadEdit(rid).unit = v; changed(); }))));
+    g.append(el("label", {}, "Direction", sel([["no", "two-way"], ["forward", "one-way, blue direction"], ["backward", "one-way, green direction"]],
+      d.one_way || "no", (v) => { roadEdit(rid).one_way = v; changed(); })));
+    box.append(g);
+    const le = ((S.edits.roads[rid] || {}).lanes || {})[String(l.lane)] || {};
+    const g2 = el("div", { class: "grp" }, el("div", { class: "t" }, `Lane ${l.lane}`));
+    const w = (() => { let a = []; for (let i = 0; i < l.inner.length; i++) a.push(Math.hypot(l.inner[i][0] - l.outer[i][0], l.inner[i][1] - l.outer[i][1])); a.sort((p, q) => p - q); return a[a.length >> 1] || 0; })();
+    g2.append(el("label", {}, "Type", sel(S.ed.lane_types.map((t) => [t, t]), le.type || l.type, (v) => {
+      const r = roadEdit(rid); r.lanes = r.lanes || {}; r.lanes[l.lane] = Object.assign(r.lanes[l.lane] || {}, { type: v }); changed(); })));
+    g2.append(el("label", {}, "Width (m)", el("input", { type: "number", min: "0.5", max: "8", step: "0.05", value: le.width ?? "",
+      placeholder: w.toFixed(2), onchange: (e) => {
+        const r = roadEdit(rid); r.lanes = r.lanes || {};
+        r.lanes[l.lane] = Object.assign(r.lanes[l.lane] || {}, { width: e.target.value === "" ? null : Number(e.target.value) }); changed(); } })));
+    g2.append(el("div", { class: "sub" }, "Leave the width empty to keep the measured one. A width you type is used along the whole road."));
+    box.append(g2);
+    box.append(el("div", { class: "row" }, el("button", { onclick: () => {
+      S.edits.removed_roads = [...new Set([...(S.edits.removed_roads || []), Number(rid)])]; S.pick = null; changed(); } }, "Delete this road")));
+  } else box.append(el("h3", {}, "Lane editor"));
+  const rm = el("div", { class: "grp" });
+  if ((S.edits.removed_turns || []).length || (S.edits.removed_roads || []).length) {
+    rm.append(el("div", { class: "t" }, "Removed"));
+    const ul = el("ul");
+    for (const k of S.edits.removed_turns || []) ul.append(el("li", {}, `turn ${k.replace(">", " to ").replace(/:/g, " lane ")} `,
+      el("a", { href: "#", onclick: (e) => { e.preventDefault(); S.edits.removed_turns = S.edits.removed_turns.filter((v) => v !== k); changed(); } }, "put back")));
+    for (const r of S.edits.removed_roads || []) ul.append(el("li", {}, `${roadName(r)} `,
+      el("a", { href: "#", onclick: (e) => { e.preventDefault(); S.edits.removed_roads = S.edits.removed_roads.filter((v) => v !== r); changed(); } }, "put back")));
+    rm.append(ul);
+    box.append(rm);
+  }
+  const row = el("div", { class: "row" },
+    el("button", { class: "primary", disabled: S.dirty ? null : "", onclick: guard(saveEdits) }, "Save and rewrite .xodr"),
+    el("button", { disabled: S.dirty ? null : "", onclick: () => { S.edits = JSON.parse(JSON.stringify(S.ed.edits)); S.dirty = false; editorPanel(); } }, "Undo"));
+  box.append(row);
+  if (S.dirty) box.append(el("div", { class: "pending" }, "Changes not saved yet."));
+  box.hidden = false;
+}
+async function saveEdits() {
+  const res = await api(`/api/maps/${S.map}/edits`, { method: "PUT", body: { edits: S.edits } });
+  S.ed = await api(`/api/maps/${S.map}/edits`);
+  S.edits = JSON.parse(JSON.stringify(S.ed.edits)); S.dirty = false; S.pick = null;
+  S.lanes = await api(`/api/maps/${S.map}/lanes`);
+  S.acc = null;
+  drawMap(); editorPanel();
+  const c = res.check;
+  toast(`Saved. The .xodr was rewritten; OpenDRIVE check: ${c.error} error(s), ${c.warning} warning(s).`, c.error > 0);
 }
 function pickRoad(px, py) {
   const [x, y] = toW(px, py);
@@ -1230,6 +1390,14 @@ const FIELDS = [
     ["xodr.segment_len", "Reference line piece length (m)", "number"],
     ["xodr.profile_step", "Profile record spacing (m)", "number"],
     ["xodr.relative_elevation", "Elevation relative to map origin", "bool", "Off: absolute altitude (m above the ellipsoid)."],
+    ["xodr.road_defaults.type", "Road type", ["town", "rural", "motorway", "lowSpeed"], "For every road; change single roads in the lane editor (Map tab, click a lane)."],
+    ["xodr.road_defaults.speed", "Speed limit", "number", "Written into the .xodr for every road unless changed in the lane editor."],
+    ["xodr.road_defaults.unit", "Speed unit", ["mph", "km/h"]],
+  ]],
+  ["Junctions", [
+    ["junctions.fit_to_curbs", "Fit the junction edge to the curbs", "bool", "Also adds a short road for each street at the junction that no drive went into."],
+    ["junctions.movements", "Turns to connect", ["all", "driven"], "all: every turn between the streets (remove single ones in the lane editor); driven: only turns a drive made."],
+    ["lanes.detect_markings", "Find stop lines and crosswalks", "bool"],
   ]],
 ];
 const getp = (o, p) => p.split(".").reduce((a, k) => (a == null ? a : a[k]), o);

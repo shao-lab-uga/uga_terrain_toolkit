@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from uga_terrain import export, geo, junctions as junctions_mod, poses, register, roads as roads_mod, xodr
+from uga_terrain import export, geo, junction_shape, junctions as junctions_mod, poses, register, roads as roads_mod, xodr
 from uga_terrain.accumulate import VoxelAccumulator
 from uga_terrain.config import work_dir
 from uga_terrain.grid import TerrainGrid
@@ -109,6 +109,32 @@ class Project:
         self.meta["road_names"] = cur
         self.save()
         apply_road_names(self)
+
+    def edits(self) -> dict:
+        """Changes made in the lane editor: per road (type, speed, unit, one_way,
+        lanes: {lane id: {type, width}}), removed_roads, removed_turns."""
+        e = dict(self.meta.get("edits") or {})
+        e.setdefault("roads", {})
+        e.setdefault("removed_roads", [])
+        e.setdefault("removed_turns", [])
+        return e
+
+    def set_edits(self, e: dict) -> dict:
+        clean = {"roads": {}, "removed_roads": sorted({int(v) for v in e.get("removed_roads") or []}),
+                 "removed_turns": sorted({str(v) for v in e.get("removed_turns") or []})}
+        for rid, d in (e.get("roads") or {}).items():
+            d = {k: v for k, v in (d or {}).items() if v not in (None, "", {})}
+            if d.get("lanes"):
+                d["lanes"] = {str(int(k)): {kk: vv for kk, vv in (v or {}).items() if vv not in (None, "")}
+                              for k, v in d["lanes"].items()}
+                d["lanes"] = {k: v for k, v in d["lanes"].items() if v}
+                if not d["lanes"]:
+                    del d["lanes"]
+            if d:
+                clean["roads"][str(int(rid))] = d
+        self.meta["edits"] = clean
+        self.save()
+        return clean
 
     def range_of(self, recording: str) -> Optional[dict]:
         return (self.meta.get("ranges") or {}).get(str(recording))
@@ -505,6 +531,37 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
         if not new:
             break
         juncs = juncs + new
+    if juncs and (cfg.get("junctions") or {}).get("fit_to_curbs", True):
+        # the junction's edge follows the curbs, and streets nobody drove into get a short road
+        progress.set("find roads", 0, 1, "fitting junctions to the curbs")
+        lines = [np.stack([r.x, r.y], 1) for r in found]
+        for jn in juncs:
+            res = junction_shape.fit(jn, junction_shape.leg_ends(jn, found), grid, cfg, lines)
+            if res:
+                jn.outline, jn.legs = res["outline"], res["legs"]
+                ol = np.asarray(jn.outline)
+                jn.r = float(np.max(np.hypot(ol[:, 0] - jn.x, ol[:, 1] - jn.y)))
+        pieces, passes = junctions_mod.cut(paths, juncs)
+        found = roads_mod.split_roads(pieces, cfg)
+        analyse(found)
+        for jn in juncs:
+            # leg rows of driven roads point at the new road ids
+            remap = {}
+            for lg in jn.legs:
+                if not lg.get("stub"):
+                    new = next((e["road"] for e in junction_shape.leg_ends(jn, found)
+                                if abs(math.remainder(e["h_out"] - math.radians(lg["theta_deg"]), 2 * math.pi))
+                                < math.radians(30)), lg.get("road"))
+                    remap[lg.get("road")] = new
+                    lg["road"] = new
+            for lg in jn.legs:
+                if lg.get("stub") and lg.get("opposite") is not None:
+                    lg["opposite"] = remap.get(lg["opposite"], lg["opposite"])
+        stubs = junction_shape.stub_roads(juncs, grid, cfg, max([r.id for r in found] + [0]) + 1, found)
+        found += stubs
+        for st in stubs:
+            progress.note("Junction %d: a street nobody drove into, %.0f m wide; added as road %d (%.0f m)." % (
+                st.meta["junction_start"], st.data["road_l"][0] * 2, st.id, st.length))
     _driven_movements(juncs, found, passes)
     for jn in juncs:
         legs = [r.id for r in found if jn.id in (r.meta.get("junction_start"), r.meta.get("junction_end"))]
@@ -515,11 +572,27 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
     export.save_json([jn.to_json() for jn in juncs], project.root / "junctions.json")
     for j, r in enumerate(found):
         roads_mod.paint_labels(r, grid)
-        if (cfg.get("lanes") or {}).get("detect_paint", True):
+        if (cfg.get("lanes") or {}).get("detect_paint", True) and not r.meta.get("stub"):
             progress.set("find lanes", j, len(found), "road %d: looking for lane paint" % r.id)
             _detect_lanes(project, r, frames, cfg, progress)
     if (cfg.get("lanes") or {}).get("detect_paint", True):
         _street_lanes(project, found, juncs, frames, cfg, progress)
+    if juncs and (cfg.get("lanes") or {}).get("detect_markings", True):
+        from uga_terrain import markings
+        jids = {jn.id for jn in juncs}
+        for j, r in enumerate(found):
+            if not jids & {r.meta.get("junction_start"), r.meta.get("junction_end")}:
+                continue
+            progress.set("find lanes", j, len(found), "road %d: stop lines and crosswalks" % r.id)
+            try:
+                ms = markings.detect(r, jids, lambda P: _scans_near(project, frames, P, cfg), cfg)
+            except Exception as e:
+                progress.note("Road %d: looking for stop lines and crosswalks failed (%s)." % (r.id, e))
+                continue
+            r.meta["markings"] = ms
+            if ms:
+                progress.note("Road %d: %s at the junction." % (r.id, ", ".join(
+                    "%s %.1f m deep" % (m["kind"].replace("_", " "), m["depth"]) for m in ms)))
     gdir = project.root / "grid"
     grid.save(gdir)
     export.save_json(export.road_json(found), project.root / "roads.json")
@@ -646,6 +719,25 @@ def _street_lanes(project: Project, found, juncs, frames: dict, cfg: dict, progr
                 if lay["source"] == "paint" else "no lane paint found, so the width is split evenly"))
 
 
+def _scans_near(project: Project, frames: dict, P: np.ndarray, cfg: dict):
+    """Lidar frames (pose, points with intensity) taken near the points P."""
+    rng = float((cfg.get("lanes") or {}).get("paint_range", 20.0)) + 5.0
+    lo, hi = P.min(0) - rng, P.max(0) + rng
+    for name, T in frames.items():
+        fdir = project.cache(int(name.split(":", 1)[0])) / "frames"
+        for k in range(len(T)):
+            c = T[k, :2, 3]
+            if not ((c >= lo).all() and (c <= hi).all()):
+                continue
+            if np.min(np.hypot(P[:, 0] - c[0], P[:, 1] - c[1])) > rng:
+                continue
+            fp = fdir / ("%06d.npy" % k)
+            if fp.is_file():
+                g = np.load(fp)
+                if g.shape[1] >= 4:
+                    yield T[k], g
+
+
 def load_junctions(project: Project):
     f = project.root / "junctions.json"
     if not f.is_file():
@@ -719,10 +811,8 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     out.mkdir(parents=True, exist_ok=True)
     origin = tuple(project.meta.get("origin") or (0.0, 0.0, 0.0))
     progress.set("export", 0, 5, "OpenDRIVE")
-    name = _slug(project.name)
     names = project.road_names()
-    xinfo = xodr.write_xodr(found, origin, cfg, out / ("%s.xodr" % name), name=name, road_names=names,
-                            junctions=load_junctions(project), ground=lambda x, y: grid.sample(x, y, "z"))
+    xinfo = write_xodr(project, cfg, grid, found)
     progress.set("export", 1, 5, "road profile CSV")
     export.write_profile_csv(found, out / "road_profile.csv")
     rows = []
@@ -771,9 +861,7 @@ def step_export(project: Project, cfg: dict, progress: Progress,
         "files": sorted(str(p.relative_to(out)) for p in out.iterdir() if p.is_file()),
     }
     # check the .xodr as a simulator would read it, replaying the car's own path
-    from uga_terrain import xodr_check
-    chk = xodr_check.check(out / ("%s.xodr" % name), [out / "trajectory.csv"])
-    export.save_json(chk, out / "xodr_check.json")
+    chk = check_xodr(project)
     summary["xodr_check"] = chk["counts"]
     export.save_json(summary, out / "summary.json")
     for f in chk["findings"]:
@@ -781,6 +869,40 @@ def step_export(project: Project, cfg: dict, progress: Progress,
             progress.note("OpenDRIVE check %s%s: %s" % (f["level"], " (road %s)" % f["road"] if f["road"] else "", f["msg"]))
     progress.set("export", 5, 5, "done")
     return summary
+
+
+def write_xodr(project: Project, cfg: dict, grid: Optional[TerrainGrid] = None, found=None) -> dict:
+    """The .xodr from the roads, junctions and the lane editor's changes."""
+    grid = grid or TerrainGrid.load(project.root / "grid")
+    found = found if found is not None else load_roads(project)
+    origin = tuple(project.meta.get("origin") or (0.0, 0.0, 0.0))
+    name = _slug(project.name)
+    project.out.mkdir(parents=True, exist_ok=True)
+    return xodr.write_xodr(found, origin, cfg, project.out / ("%s.xodr" % name), name=name,
+                           road_names=project.road_names(), junctions=load_junctions(project),
+                           ground=lambda x, y: grid.sample(x, y, "z"), edits=project.edits())
+
+
+def check_xodr(project: Project) -> dict:
+    from uga_terrain import xodr_check
+    out = project.out
+    chk = xodr_check.check(out / ("%s.xodr" % _slug(project.name)), [out / "trajectory.csv"])
+    export.save_json(chk, out / "xodr_check.json")
+    return chk
+
+
+def apply_edits(project: Project, cfg: dict) -> dict:
+    """Rewrite and re-check the .xodr after the lane editor changed something
+    (no rebuild needed)."""
+    xinfo = write_xodr(project, cfg)
+    chk = check_xodr(project)
+    sj = project.out / "summary.json"
+    if sj.is_file():
+        summary = json.loads(sj.read_text())
+        summary["roads"] = xinfo
+        summary["xodr_check"] = chk["counts"]
+        export.save_json(summary, sj)
+    return {"xodr": xinfo, "check": chk["counts"]}
 
 
 def apply_road_names(project: Project) -> None:

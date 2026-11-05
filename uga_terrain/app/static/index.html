@@ -98,13 +98,14 @@
         <label><input type="checkbox" id="show-drives" checked> Drive path</label>
         <label><input type="checkbox" id="show-legend" checked> Legend</label>
         <button id="btn-fit" class="small" title="Fit the map and turn north up">Fit</button>
-        <span class="muted">Drag to pan, right-drag to rotate, scroll to zoom.</span>
+        <span class="muted">Drag to pan, right-drag to rotate, scroll to zoom. Click a lane to edit it.</span>
       </div>
       <div class="map-wrap">
         <canvas id="map-canvas"></canvas>
         <div id="readout" class="readout">Move the mouse over the map</div>
         <div id="map-empty" class="empty">Build a map to see it here.</div>
         <div id="map-legend" class="legend-box" hidden></div>
+        <div id="lane-editor" class="editor-box" hidden></div>
       </div>
     </section>
 

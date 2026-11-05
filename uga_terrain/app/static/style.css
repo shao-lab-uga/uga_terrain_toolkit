@@ -63,6 +63,19 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .readout { position: absolute; left: 8px; bottom: 8px; background: color-mix(in srgb, var(--panel) 88%, transparent);
   padding: 6px 9px; border-radius: 6px; font-size: 12px; pointer-events: none; white-space: pre; }
 .empty { position: absolute; inset: 0; pointer-events: none; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.editor-box { position: absolute; right: 10px; bottom: 10px; width: 300px; max-height: calc(100% - 20px); overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 12px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+.editor-box h3 { margin: 0 0 2px; font-size: 13px; }
+.editor-box .sub { color: var(--muted); margin-bottom: 8px; }
+.editor-box .grp { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
+.editor-box .grp > .t { font-weight: 600; margin-bottom: 6px; }
+.editor-box label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; }
+.editor-box input[type=number] { width: 70px; }
+.editor-box .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.editor-box .x { position: absolute; right: 8px; top: 6px; border: none; background: none; font-size: 16px; cursor: pointer; color: var(--muted); }
+.editor-box .pending { color: var(--warn); margin-top: 6px; }
+.editor-box ul { margin: 4px 0; padding-left: 16px; }
 .legend-box { position: absolute; right: 10px; top: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; pointer-events: none; min-width: 120px; }
 .legend-box .t { font-weight: 600; margin-bottom: 6px; }

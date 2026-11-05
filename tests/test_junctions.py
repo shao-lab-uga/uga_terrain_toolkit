@@ -105,3 +105,89 @@ def test_register_recovers_a_known_offset():
     assert np.median(err) < 0.05
     zfit = register.match_z(A, Bc)
     assert abs(zfit["dz"] - 0.12) < 0.02
+
+
+def _crossroads_grid():
+    """Flat 10 m wide streets along x and y through (0, 0), raised sidewalks
+    behind 15 cm curbs elsewhere (rough where the curb steps up)."""
+    from uga_terrain.grid import TerrainGrid
+    g = TerrainGrid(0.2, 512)
+    for kx in (-1, 0):
+        for ky in (-1, 0):
+            c = (np.arange(512) + 0.5) * 0.2
+            X, Y = np.meshgrid(kx * 102.4 + c, ky * 102.4 + c)
+            def street(X, Y):
+                # 10 m streets; the corners are rounded a bit, like curb returns
+                corner = (np.abs(X) < 8.0) & (np.abs(Y) < 8.0) & (np.hypot(np.abs(X) - 8.0, np.abs(Y) - 8.0) > 3.0)
+                return (np.abs(X) < 5.0) | (np.abs(Y) < 5.0) | corner
+            road = street(X, Y)
+            z = np.where(road, 0.0, 0.15).astype(np.float32)
+            edge = np.zeros_like(road)
+            for dx, dy in ((0.4, 0), (-0.4, 0), (0, 0.4), (0, -0.4)):   # within 0.4 m of the curb
+                edge |= street(X + dx, Y + dy) != road
+            rough = np.where(edge, 0.06, 0.01).astype(np.float32)
+            g.tiles[(kx, ky)] = {"z": z, "roughness": rough, "slope_deg": np.zeros_like(z),
+                                 "label": np.full_like(z, 4)}
+    return g
+
+
+def test_junction_fits_the_curbs_and_adds_undriven_streets():
+    from uga_terrain import junction_shape as JS
+    cfg = load_config()
+    g = _crossroads_grid()
+    # one drive comes in from the west and stops at the junction
+    x = np.arange(-60.0, -12.0, 1.0)
+    r1 = Road(1, "0:drive", x - x[0], x, np.full(len(x), -2.0), np.zeros(len(x)), {}, {"junction_end": 1000})
+    jn = J.Junction(1000, 0.0, 0.0, 16.0, ["test"])
+    res = JS.fit(jn, JS.leg_ends(jn, [r1]), g, cfg, [np.c_[r1.x, r1.y]])
+    stubs = [l for l in res["legs"] if l.get("stub")]
+    dirs = sorted(round(l["theta_deg"] / 90.0) % 4 for l in stubs)
+    assert dirs == [0, 1, 3], res["legs"]                    # east, north, south
+    assert all(8.0 <= l["width"] <= 12.0 for l in stubs)
+    # the edge sits where the curb returns end, well inside the old circle
+    west = next(l for l in res["legs"] if l.get("road") == 1)
+    assert 6.0 <= west["d_cut"] <= 14.0
+    jn.outline, jn.legs = res["outline"], res["legs"]
+    assert jn.contains(0.0, 0.0) and not jn.contains(-30.0, 0.0)
+    roads = JS.stub_roads([jn], g, cfg, 2)
+    assert len(roads) == 3 and all(r.meta["junction_start"] == 1000 and r.meta["stub"] for r in roads)
+
+
+def test_edits_one_way_speed_and_removed_turn(tmp_path):
+    cfg = load_config()
+    y1 = np.arange(-60.0, -10.0, 1.0)
+    r1 = _road(1, np.zeros(len(y1)), y1, np.full(len(y1), math.pi / 2), {"junction_end": 1000})
+    x2 = np.arange(10.0, 60.0, 1.0)
+    r2 = _road(2, x2, np.zeros(len(x2)), np.zeros(len(x2)), {"junction_start": 1000})
+    jn = J.Junction(1000, 0.0, 0.0, 10.0, ["test"], {"1>2": 1})
+    out = tmp_path / "j.xodr"
+    edits = {"roads": {"2": {"one_way": "forward", "speed": 30, "unit": "mph"}}}
+    info = xodr.write_xodr([r1, r2], (33.9, -83.4, 200.0), cfg, out, junctions=[jn], edits=edits)
+    # road 2 is one-way away from the junction: only the right turn into it is left
+    assert info["connecting_roads"] == 1
+    root, roads, _ = X.read(out)
+    r2x = next(r for r in roads if r.id == "2")
+    ids = sorted(l for l, ln in r2x.sections[0].lanes.items() if ln.type == "driving")
+    assert ids == [-2, -1]
+    sp = root.find("road[@id='2']/type/speed")
+    assert sp.get("max") == "30" and sp.get("unit") == "mph"
+    # a removed turn is not written
+    info = xodr.write_xodr([r1, r2], (33.9, -83.4, 200.0), cfg, out, junctions=[jn],
+                           edits={"removed_turns": ["1:-1>2:-1"]})
+    assert [c["turn"] for c in info["junctions"][0]["connections"]] == ["left"]
+
+
+def test_markings_become_road_objects(tmp_path):
+    cfg = load_config()
+    x2 = np.arange(10.0, 60.0, 1.0)
+    r2 = _road(2, x2, np.zeros(len(x2)), np.zeros(len(x2)), {})
+    r2.meta["markings"] = [{"kind": "crosswalk", "polygon": [[12, -3.5], [15, -3.5], [15, 3.5], [12, 3.5]]},
+                           {"kind": "stop_line", "polygon": [[17, -3.5], [17.5, -3.5], [17.5, 0], [17, 0]]}]
+    out = tmp_path / "m.xodr"
+    xodr.write_xodr([r2], (33.9, -83.4, 200.0), cfg, out)
+    o = X.check(out)
+    assert o["counts"]["error"] == 0, o["findings"]
+    m = X.lane_geometry(out)["markings"]
+    assert [v["type"] for v in m] == ["crosswalk", "roadMark"]
+    P = np.array(m[0]["polygon"])
+    assert abs(P[:, 0].min() - 12) < 0.05 and abs(P[:, 1].max() - 3.5) < 0.05

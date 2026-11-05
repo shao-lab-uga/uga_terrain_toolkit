@@ -53,15 +53,24 @@ class Junction:
     why: List[str] = field(default_factory=list)
     movements: Dict[str, int] = field(default_factory=dict)  # "legA>legB" -> times driven (filled later)
     paths: Dict[str, list] = field(default_factory=dict)     # "legA>legB" -> a driven path [[x, y], ...]
+    outline: list = field(default_factory=list)              # [[x, y], ...] edge fitted to the curbs
+    legs: list = field(default_factory=list)                 # streets meeting here (junction_shape.fit)
 
     def to_json(self) -> dict:
         return {"id": self.id, "x": self.x, "y": self.y, "r": self.r, "why": self.why,
-                "movements": self.movements, "paths": self.paths}
+                "movements": self.movements, "paths": self.paths, "outline": self.outline, "legs": self.legs}
 
     @classmethod
     def from_json(cls, d: dict) -> "Junction":
         return cls(int(d["id"]), float(d["x"]), float(d["y"]), float(d["r"]), list(d.get("why") or []),
-                   dict(d.get("movements") or {}), dict(d.get("paths") or {}))
+                   dict(d.get("movements") or {}), dict(d.get("paths") or {}),
+                   list(d.get("outline") or []), list(d.get("legs") or []))
+
+    def contains(self, x, y) -> np.ndarray:
+        if len(self.outline) >= 3:
+            from uga_terrain.junction_shape import point_in_poly
+            return point_in_poly(x, y, self.outline)
+        return np.hypot(np.asarray(x) - self.x, np.asarray(y) - self.y) < self.r
 
 
 def _wrap(a):
@@ -231,7 +240,7 @@ def cut(drives: Sequence[Tuple[str, np.ndarray]], junctions: Sequence[Junction])
         xy = np.asarray(xy, float)
         inside = np.full(len(xy), -1)
         for j in junctions:
-            m = np.hypot(xy[:, 0] - j.x, xy[:, 1] - j.y) < j.r
+            m = j.contains(xy[:, 0], xy[:, 1])
             inside[m & (inside < 0)] = j.id
         k = 0
         n = len(xy)
@@ -413,7 +422,8 @@ def _elevation(geoms, c0, c1, A, B, ground, z_off: float):
 
 
 def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int, dict], cfg: dict,
-                next_id: int, ground=None, z_off: float = 0.0) -> dict:
+                next_id: int, ground=None, z_off: float = 0.0, removed_turns=frozenset(),
+                details=None) -> dict:
     """Junction elements, connecting roads and leg links, added to ``root``.
     road_ends: road id -> {"start": junction id or None, "end": ...};
     ground: optional f(x, y) -> map height, for the connecting roads' elevation."""
@@ -473,6 +483,8 @@ def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int
                 pairs = _pick(inc, outl, turn)
                 path = j.paths.get(key)
                 for la, lb in pairs:
+                    if "%s:%d>%s:%d" % (A["road"], la, B["road"], lb) in removed_turns:
+                        continue
                     LA, LB = A["lanes"][la], B["lanes"][lb]
                     # lane edges in the travel frame (right is negative)
                     in0, out0 = dir_a * LA["inner"], dir_a * LA["outer"]
@@ -500,7 +512,11 @@ def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int
                                   contactPoint=A["contact"])
                     ET.SubElement(lk, "successor", elementType="road", elementId=B["road"],
                                   contactPoint=B["contact"])
-                    ET.SubElement(r, "type", s="0", type="town")
+                    if details is not None:          # the incoming road's type and speed limit
+                        from uga_terrain.xodr import _type_element
+                        _type_element(r, details(A["road"]))
+                    else:
+                        ET.SubElement(r, "type", s="0", type="town")
                     pv = ET.SubElement(r, "planView")
                     for (s0, gx, gy, gh, gl, U, V) in geoms:
                         g = ET.SubElement(pv, "geometry", s=_f(s0), x=_f(gx), y=_f(gy), hdg=_f(gh),

@@ -854,7 +854,34 @@ def lane_geometry(path, step: float = 1.0) -> dict:
                     continue
                 lanes.append({"road": r.id, "lane": lid, "type": ln.type, "junction": jn,
                               "name": r.name, "inner": pts(ti), "outer": pts(to)})
-    return {"lanes": lanes, "centre": centre, "junctions": [j.id for j in juncs]}
+    return {"lanes": lanes, "centre": centre, "junctions": [j.id for j in juncs],
+            "markings": road_objects(root, roads)}
+
+
+def road_objects(root, roads: List[Road]) -> List[dict]:
+    """Road objects with an outline (crosswalks, stop lines) as world polygons."""
+    by_id = {r.id: r for r in roads}
+    out = []
+    for re_ in root.findall("road"):
+        r = by_id.get(re_.get("id"))
+        if r is None:
+            continue
+        ref = reference(r)
+        if len(ref) < 2:
+            continue
+        for o in re_.findall("objects/object"):
+            s0, t0 = _num(o, "s"), _num(o, "t")
+            x = float(np.interp(s0, ref[:, 0], ref[:, 1]))
+            y = float(np.interp(s0, ref[:, 0], ref[:, 2]))
+            h = float(np.interp(s0, ref[:, 0], np.unwrap(ref[:, 3]))) + _num(o, "hdg")
+            ox, oy = x - t0 * math.sin(h), y + t0 * math.cos(h)
+            corners = o.findall("outlines/outline/cornerLocal") or o.findall("outline/cornerLocal")
+            poly = [[round(ox + _num(c, "u") * math.cos(h) - _num(c, "v") * math.sin(h), 3),
+                     round(oy + _num(c, "u") * math.sin(h) + _num(c, "v") * math.cos(h), 3)] for c in corners]
+            if len(poly) >= 3:
+                out.append({"road": r.id, "id": o.get("id"), "type": o.get("type"),
+                            "subtype": o.get("subtype"), "name": o.get("name"), "polygon": poly})
+    return out
 
 
 # --- entry point --------------------------------------------------------------------

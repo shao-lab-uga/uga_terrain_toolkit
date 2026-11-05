@@ -346,6 +346,32 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         f = project(slug).root / "roads.json"
         return Response(f.read_text() if f.is_file() else "[]", media_type="application/json")
 
+    @app.get("/api/maps/{slug}/edits")
+    def get_edits(slug: str):
+        from uga_terrain import xodr as xodr_mod
+        p = project(slug)
+        c = cfg()
+        roads = [{"id": int(d["id"]), "stub": bool((d.get("meta") or {}).get("stub")),
+                  "details": xodr_mod.road_details(c, p.edits(), d["id"])}
+                 for d in json.loads((p.root / "roads.json").read_text())] if (p.root / "roads.json").is_file() else []
+        return {"edits": p.edits(), "roads": roads, "road_types": list(xodr_mod.ROAD_TYPES),
+                "lane_types": list(xodr_mod.LANE_TYPES),
+                "defaults": xodr_mod.road_details(c, None, -1)}
+
+    @app.put("/api/maps/{slug}/edits")
+    def put_edits(slug: str, body: dict = Body(...)):
+        p = project(slug)
+        if jobs.busy():
+            raise HTTPException(409, "wait for the running job to finish")
+        if not (p.root / "roads.json").is_file():
+            raise HTTPException(400, "build the map first")
+        p.set_edits(body.get("edits") or {})
+        try:
+            res = pipeline.apply_edits(p, cfg())
+        except Exception as e:  # keep the app up; say what went wrong
+            raise HTTPException(500, "the .xodr could not be rewritten: %s" % e)
+        return dict(res, edits=p.edits())
+
     @app.get("/api/maps/{slug}/junctions")
     def junctions(slug: str):
         f = project(slug).root / "junctions.json"
