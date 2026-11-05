@@ -34,6 +34,7 @@ class Road:
     y: np.ndarray
     heading: np.ndarray
     data: Dict[str, np.ndarray] = field(default_factory=dict)
+    meta: Dict = field(default_factory=dict)     # road-level results, e.g. the lane model
 
     @property
     def length(self) -> float:

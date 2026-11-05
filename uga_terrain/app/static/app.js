@@ -732,6 +732,7 @@ async function loadAccuracy() {
       B.append(el("h4", {}, `${roadName(r.id)} (${r.length_m.toFixed(0)} m)`), el("div", { class: "table-wrap" }, t));
     }
   }
+  await loadXodrCheck();
   // cross-section controls
   const sel = $("sec-road");
   const keep = Number(sel.value);
@@ -740,6 +741,43 @@ async function loadAccuracy() {
   if (S.roads.some((r) => r.id === keep)) sel.value = keep;
   setSectionRange();
   await loadSection();
+}
+// OpenDRIVE checks: is the .xodr valid, are its lanes steady, does the drive replay onto it?
+async function loadXodrCheck() {
+  const B = $("xodr-body");
+  B.innerHTML = "";
+  const x = await api(`/api/maps/${S.map}/xodr_check`);
+  if (!x) return;
+  const c = x.counts;
+  B.append(el("h3", {}, "Road network (OpenDRIVE) checks"),
+    el("p", { class: "muted help" }, "The exported .xodr is read back by the app's own OpenDRIVE reader and checked against the rules simulators rely on (it has not been loaded in CARLA itself yet). Errors can make a simulator reject or misread the file; warnings mean the file is valid but not yet a reliable, drivable lane map."),
+    el("p", { class: "help" }, el("b", { class: c.error ? "bad" : "ok" }, `${c.error} error(s)`), `, ${c.warning} warning(s)`));
+  const lvl = { error: "bad", warning: "warn-t", info: "muted" };
+  B.append(el("ul", { class: "help" }, ...x.findings.map((f) =>
+    el("li", {}, el("span", { class: lvl[f.level] || "" }, f.level.toUpperCase()), " ", f.road ? `${roadName(Number(f.road))}: ` : "", f.msg))));
+  for (const r of x.replay || []) {
+    const t = el("table");
+    const row = (k, v) => t.append(el("tr", {}, el("td", {}, k), el("td", {}, v)));
+    row("Poses", r.poses);
+    row("On a road", fmt(r.on_road_pct, 0) + " %");
+    row("Inside a driving lane", fmt(r.in_driving_lane_pct, 0) + " %");
+    row("Lanes used", (r.lanes_used || []).map((s) => { const [rd, ln] = s.split(":"); return `${roadName(Number(rd))} lane ${ln}`; }).join(", ") || "–");
+    row("Lane changes", r.lane_changes ?? "–");
+    row("Distance from lane centre (median / 95 %)", r.lane_centre_offset_median_m != null ? `${fmt(r.lane_centre_offset_median_m)} m / ${fmt(r.lane_centre_offset_p95_m)} m` : "–");
+    row("Heading vs lane direction (median)", r.heading_error_median_deg != null ? fmt(r.heading_error_median_deg, 1) + "°" : "–");
+    row("Driving against the lane direction", r.wrong_way_pct != null ? fmt(r.wrong_way_pct, 0) + " %" : "–");
+    row("Vehicle height above the road surface (median / 10–90 % spread)", r.height_vs_road_median_m != null ? `${cm(r.height_vs_road_median_m)} / ${cm(r.height_vs_road_spread_m)}` : "–");
+    B.append(el("h4", {}, `Replaying the car's own drive (${r.trajectory}) onto the map`), el("div", { class: "table-wrap" }, t));
+  }
+  if ((x.lane_widths || []).length) {
+    const t = el("table");
+    t.append(el("tr", {}, ...["Road", "Lane", "Typical width", "Narrowest", "Widest", "Change along road"].map((h) => el("th", {}, h))));
+    for (const w of x.lane_widths) {
+      const bad = w.min_m < 2.5 || w.max_m > 4.6 || w.spread_m > 0.3;
+      t.append(el("tr", { class: bad ? "warn" : "" }, ...[roadName(Number(w.road)), w.lane, fmt(w.median_m) + " m", fmt(w.min_m) + " m", fmt(w.max_m) + " m", fmt(w.spread_m) + " m"].map((v) => el("td", {}, v))));
+    }
+    B.append(el("h4", {}, "Driving lane widths"), el("div", { class: "table-wrap" }, t));
+  }
 }
 function setSectionRange() {
   const r = S.roads.find((x) => x.id === Number($("sec-road").value));

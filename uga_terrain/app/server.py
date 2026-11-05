@@ -263,6 +263,20 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         f = project(slug).root / "accuracy.json"
         return Response(f.read_text() if f.is_file() else "null", media_type="application/json")
 
+    @app.get("/api/maps/{slug}/xodr_check")
+    def xodr_check_result(slug: str):
+        """OpenDRIVE checks of the exported .xodr (run now if missing or stale)."""
+        from uga_terrain import export, xodr_check
+        p = project(slug)
+        xs = sorted(p.out.glob("*.xodr")) if p.out.is_dir() else []
+        if not xs:
+            return Response("null", media_type="application/json")
+        f = p.out / "xodr_check.json"
+        if not f.is_file() or f.stat().st_mtime < xs[0].stat().st_mtime:
+            tr = p.out / "trajectory.csv"
+            export.save_json(xodr_check.check(xs[0], [tr] if tr.is_file() else []), f)
+        return Response(f.read_text(), media_type="application/json")
+
     @app.get("/api/maps/{slug}/section")
     def road_section(slug: str, road: int, s: float, half_width: float = Query(15.0, ge=2, le=40)):
         """Raw ground points of every scan in a thin slice across a road."""

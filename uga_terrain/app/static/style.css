@@ -122,3 +122,6 @@ code { font-size: 12px; }
 tr.warn td { color: var(--warn); font-weight: 600; }
 #tab-accuracy h4 { margin: 12px 0 4px; }
 .danger-zone { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); }
+.bad { color: var(--bad); font-weight: 600; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn-t { color: var(--warn); font-weight: 600; }

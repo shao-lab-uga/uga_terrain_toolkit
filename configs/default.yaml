@@ -84,6 +84,11 @@ roads:
   dedup_dist: 3.0         # a later pass this close to an existing road is not a new road
   min_road_length: 15.0
 
+lanes:
+  detect_paint: true      # find lane lines in the lidar intensity
+  paint_range: 20.0       # use points up to this far from the car (m)
+  min_contrast: 0.25      # how much brighter than the asphalt a line must be
+
 xodr:
   segment_len: 20.0       # length of each reference-line curve piece (m)
   profile_step: 5.0       # spacing of elevation / superelevation / width records (m)

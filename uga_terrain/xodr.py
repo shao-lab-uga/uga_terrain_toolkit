@@ -1,13 +1,15 @@
 """Write roads as OpenDRIVE 1.6 (.xodr) with elevation, banking, lanes, sidewalks.
 
-Each road's reference line is the driven path, fitted with ``paramPoly3``
-pieces. Along it:
+Each road's reference line is the centre line between the two directions
+(from the lane model in ``lanes.py``; the driven path when there is none),
+fitted with ``paramPoly3`` pieces. Along it:
 
 * ``elevationProfile``: road height (cubic pieces through the measured profile);
 * ``lateralProfile/superelevation``: banking, positive when the road falls to
   the right (left side higher), as OpenDRIVE defines it;
-* ``laneOffset`` + driving lanes: the measured paved width split into lanes of
-  about ``lane_width``; the drive is taken to be in a right-hand lane;
+* driving lanes and shoulders from the lane model: painted lines found in the
+  lidar intensity, steady widths; without a lane model the paved width is
+  split into lanes of about ``lane_width`` (with a ``laneOffset``);
 * per side, outward: ``border`` (curb), ``border`` (verge, when there is one)
   and ``sidewalk`` lanes, each with ``height`` records for the curb height.
 
@@ -144,12 +146,40 @@ def _present(v: np.ndarray, frac: float = 0.3) -> bool:
     return bool(np.mean(np.nan_to_num(v) > 0) >= frac)
 
 
+def on_centre_line(road: Road) -> Road:
+    """The same road with its reference line moved onto the lane model's centre
+    line (the boundary between the two directions); lateral values follow."""
+    lm = road.meta.get("lanes") if road.meta else None
+    if not lm or ("lb%d" % lm["centre"]) not in road.data:
+        return road
+    d = road.data
+    tc = _clean(d["lb%d" % lm["centre"]])
+    if np.max(np.abs(tc)) < 1e-3:
+        return road
+    nx, ny = -np.sin(road.heading), np.cos(road.heading)
+    x, y = road.x + tc * nx, road.y + tc * ny
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    h = np.unwrap(np.arctan2(np.gradient(y), np.gradient(x)))
+    nd = dict(d)
+    for k in d:
+        if k.startswith("lb"):
+            nd[k] = d[k] - tc
+    if "road_l" in d:
+        nd["road_l"] = d["road_l"] - tc
+    if "road_r" in d:
+        nd["road_r"] = d["road_r"] + tc
+    if "z" in d:
+        nd["z"] = d["z"] + np.tan(np.radians(np.nan_to_num(d.get("bank_deg", np.zeros_like(tc))))) * tc
+    return Road(road.id, road.source, s + road.s[0], x, y, h, nd, dict(road.meta))
+
+
 def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = ""):
     xc = cfg.get("xodr") or {}
     rc = cfg.get("roads") or {}
     seg = float(xc.get("segment_len") or 20.0)
     step = float(xc.get("profile_step") or 5.0)
     lane_w = float(rc.get("lane_width") or 3.5)
+    road = on_centre_line(road)
     d = road.data
     geoms = fit_param_poly3(road.x, road.y, road.heading, seg)
     Lg = sum(g[4] for g in geoms)
@@ -180,27 +210,45 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
     for (s0, a, b, c, dd) in linear(knots, sup):
         ET.SubElement(lp, "superelevation", s=_f(s0), a=_f(a), b=_f(b), c=_f(c), d=_f(dd))
 
-    road_l = np.maximum(at("road_l", 1.75), 0.5)
-    road_r = np.maximum(at("road_r", 1.75), 0.5)
-    total = road_l + road_r
-    n = max(1, int(round(float(np.median(total)) / lane_w)))
-    n_r = max(1, int(math.ceil(n / 2.0)))
-    n_l = n - n_r
-    w_lane = total / n
-    offset = road_l - n_l * w_lane          # centre lane position, left of the reference
+    lm = road.meta.get("lanes") if road.meta else None
+    nb = len([k for k in d if k.startswith("lb")])
     lanes = ET.SubElement(r, "lanes")
-    for (s0, a, b, c, dd) in linear(knots, offset):
-        ET.SubElement(lanes, "laneOffset", s=_f(s0), a=_f(a), b=_f(b), c=_f(c), d=_f(dd))
+    if lm and nb >= 2 and nb == len(lm["types"]) + 1:
+        # lanes from the lane model; the reference line is its centre line
+        c = int(lm["centre"])
+        bounds = [at("lb%d" % k) for k in range(nb)]
+        offset = bounds[c]
+        mark_of = {"solid": ("solid", "white"), "broken": ("broken", "white")}
+        per_side = {"r": [(lm["types"][k], bounds[k + 1] - bounds[k], mark_of.get(lm["marks"][k]))
+                          for k in range(c - 1, -1, -1)],
+                    "l": [(lm["types"][k], bounds[k + 1] - bounds[k], mark_of.get(lm["marks"][k + 1]))
+                          for k in range(c, nb - 1)]}
+        centre_mark = lm["marks"][c] if lm["marks"][c] in ("solid", "broken") else None
+        n_l = len(per_side["l"])
+    else:
+        road_l = np.maximum(at("road_l", 1.75), 0.5)
+        road_r = np.maximum(at("road_r", 1.75), 0.5)
+        total = road_l + road_r
+        n = max(1, int(round(float(np.median(total)) / lane_w)))
+        n_r = max(1, int(math.ceil(n / 2.0)))
+        n_l = n - n_r
+        w_lane = total / n
+        offset = road_l - n_l * w_lane          # centre lane position, left of the reference
+        per_side = {side: [("driving", w_lane, ("solid", "white") if k == n_side - 1 else ("broken", "white"))
+                           for k in range(n_side)] for side, n_side in (("l", n_l), ("r", n_r))}
+        centre_mark = "solid" if n_l else None
+    if np.max(np.abs(offset)) > 1e-3:
+        for (s0, a, b, c_, dd) in linear(knots, offset):
+            ET.SubElement(lanes, "laneOffset", s=_f(s0), a=_f(a), b=_f(b), c=_f(c_), d=_f(dd))
     sec = ET.SubElement(lanes, "laneSection", s="0")
     sides = {}
-    for side, sign, n_side in (("l", 1, n_l), ("r", -1, n_r)):
+    for side, sign in (("l", 1), ("r", -1)):
         parent = ET.SubElement(sec, "left" if side == "l" else "right")
         sides[side] = parent
         lid = 0
-        for k in range(n_side):
+        for ltype, widths, mark in per_side[side]:
             lid += sign
-            mark = ("solid", "white") if k == n_side - 1 else ("broken", "white")
-            _lane(parent, lid, "driving", knots, w_lane, mark=mark)
+            _lane(parent, lid, ltype, knots, np.maximum(widths, 0.0), mark=mark)
         curb = np.abs(at("curb_h_" + side))
         verge = at("verge_" + side)
         walk = at("walk_" + side)
@@ -224,8 +272,8 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         left.append(it)
     centre = ET.SubElement(sec, "center")
     c_lane = ET.SubElement(centre, "lane", id="0", type="none", level="false")
-    ET.SubElement(c_lane, "roadMark", sOffset="0", type="solid" if n_l else "none",
-                  weight="standard", color="yellow" if n_l else "standard", width="0.12")
+    ET.SubElement(c_lane, "roadMark", sOffset="0", type=centre_mark or "none",
+                  weight="standard", color="yellow" if centre_mark else "standard", width="0.12")
     # put <center> between <left> and <right>
     sec.remove(centre)
     sec.insert(1, centre)

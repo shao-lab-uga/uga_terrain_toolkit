@@ -22,6 +22,12 @@ def test_build_from_mcap(tmp_path, monkeypatch):
     assert root.findall("road")
     assert summary["roads"]
     assert pipeline.steps_available(p) == ["scan", "map", "roads", "export"]
+    # the exported OpenDRIVE passes the checks and the drive replays inside one lane
+    import json
+    chk = json.loads((p.out / "xodr_check.json").read_text())
+    assert chk["counts"]["error"] == 0, chk["findings"]
+    rp = chk["replay"][0]
+    assert rp["in_driving_lane_pct"] > 95 and rp["wrong_way_pct"] == 0
 
     # accuracy check: a simulated drive with exact poses should agree with itself
     acc = accuracy.check(p, cfg)

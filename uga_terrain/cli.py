@@ -23,6 +23,11 @@ def main(argv=None) -> int:
     b.add_argument("--name", required=True, help="map name")
     b.add_argument("--start", default="scan", choices=["scan", "map", "roads", "export"])
     b.add_argument("files", nargs="*", help=".mcap recordings (omit to rebuild an existing map)")
+    c = sub.add_parser("check", help="check an OpenDRIVE file: format, lanes, trajectory replay")
+    c.add_argument("xodr")
+    c.add_argument("--trajectory", action="append", default=[],
+                   help="CSV with x, y (and z, yaw_deg) in the map frame; repeat for several")
+    c.add_argument("--json", action="store_true", help="print the full result as JSON")
     i = sub.add_parser("inspect", help="list a recording's topics and check the needed ones")
     i.add_argument("file")
     args = ap.parse_args(argv)
@@ -51,6 +56,15 @@ def main(argv=None) -> int:
             threading.Timer(1.5, webbrowser.open_new_tab, (url,)).start()
         serve(host, port)
         return 0
+
+    if args.cmd == "check":
+        from uga_terrain import xodr_check
+        res = xodr_check.check(args.xodr, args.trajectory)
+        if args.json:
+            print(json.dumps(res, indent=1))
+        else:
+            print(xodr_check.text_report(res))
+        return 1 if res["counts"]["error"] else 0
 
     if args.cmd == "inspect":
         from uga_terrain import mcap_io

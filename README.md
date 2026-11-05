@@ -103,6 +103,23 @@ All tuning values are in `configs/default.yaml`. Changes made in the app go to `
 
 Some i7/i9 13th and 14th-gen CPUs were damaged by a voltage fault and give random, different errors on every build, even with Intel's microcode fix. If that happens, set **Settings > CPU cores to use** to **e-cores**. The app then runs only on the slower efficiency cores, which are not affected. Builds are slower, and nothing else changes. Set it back to **all** once the CPU is replaced.
 
+## Lanes and OpenDRIVE checks
+
+**Lanes.** Lane paint reflects the lidar much more strongly than asphalt. The app builds a road-aligned image of relative lidar intensity, finds the thin bright stripes in it, links them into lines along the road and fits each with a smooth curve. Lanes are the strips between neighbouring boundaries (curb, lines, curb). The painted line nearest the middle of the road is taken as the centre line between the two directions, and the .xodr reference line is placed on it. Driving lanes keep a steady width; where the curb moves away (turn pockets, side streets, parking) the extra width becomes a shoulder lane. Without paint, the paved width is split evenly. The lidar cannot see paint colour, so the centre line is written as yellow and other lines as white.
+
+**Checks.** After every export the .xodr is read back by the app's own OpenDRIVE reader (`uga_terrain/xodr_check.py`) and checked:
+
+- **Format:** ids, geometry lengths and joins, profile records, lane ids and widths, links between roads, junction connections and lane links.
+- **Lanes:** driving lane widths are plausible (2.5–4.6 m) and steady along the road.
+- **Network:** roads with no connection, separate pieces of network.
+- **Replay:** the car's own trajectory is placed onto the map: share of poses inside a driving lane, lane changes, distance from the lane centre, heading against the lane direction, and vehicle height against the road surface.
+
+Results are in `xodr_check.json` and on the **Accuracy** tab. Any .xodr can be checked from the command line, with any trajectory in the map's x/y frame:
+
+```bash
+python -m uga_terrain check map.xodr --trajectory trajectory.csv
+```
+
 ## Accuracy check
 
 There is no surveyed ground truth, so the check compares the recordings with themselves:

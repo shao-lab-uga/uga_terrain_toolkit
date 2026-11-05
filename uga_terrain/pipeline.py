@@ -488,10 +488,46 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
         rpy = geo.mat_to_rpy(T[idx, :3, :3])
         roads_mod.analyse_road(r, grid, cfg, vehicle_rpy=(rpy[:, 0], rpy[:, 1]))
         roads_mod.paint_labels(r, grid)
+        if (cfg.get("lanes") or {}).get("detect_paint", True):
+            progress.set("find lanes", j, len(found), "road %d: looking for lane paint" % r.id)
+            _detect_lanes(project, r, T, cfg, progress)
     gdir = project.root / "grid"
     grid.save(gdir)
     export.save_json(export.road_json(found), project.root / "roads.json")
     return grid, found
+
+
+def _detect_lanes(project: Project, road, T: np.ndarray, cfg: dict, progress: Progress) -> None:
+    """Lane lines from lidar intensity; the lane model goes into road.data
+    (boundaries lb0..lbN) and road.meta["lanes"]."""
+    from uga_terrain import lanes
+    rec = int(road.source.split(":", 1)[0])
+    fdir = project.cache(rec) / "frames"
+    lo = np.array([road.x.min(), road.y.min()]) - 45.0
+    hi = np.array([road.x.max(), road.y.max()]) + 45.0
+
+    def scans():
+        for k in range(len(T)):
+            c = T[k, :2, 3]
+            f = fdir / ("%06d.npy" % k)
+            if (c >= lo).all() and (c <= hi).all() and f.is_file():
+                g = np.load(f)
+                if g.shape[1] >= 4:
+                    yield T[k], g
+    try:
+        lay = lanes.detect(road, scans, cfg)
+    except Exception as e:  # keep the build going with evenly split lanes
+        progress.note("Road %d: lane detection failed (%s); lanes are split evenly." % (road.id, e))
+        return
+    for k in [k for k in road.data if k.startswith("lb")]:
+        del road.data[k]
+    for k, b in enumerate(lay.pop("bounds")):
+        road.data["lb%d" % k] = b
+    road.meta["lanes"] = lay
+    n_drive = sum(t == "driving" for t in lay["types"])
+    progress.note("Road %d: %d driving lane(s), %s." % (
+        road.id, n_drive, "from %d painted line(s)" % len(lay["lines"]) if lay["source"] == "paint"
+        else "no lane paint found, so the width is split evenly"))
 
 
 def load_roads(project: Project) -> List[roads_mod.Road]:
@@ -503,7 +539,8 @@ def load_roads(project: Project) -> List[roads_mod.Road]:
         r = roads_mod.Road(d["id"], d["source"], np.asarray(d["s"], float),
                            np.asarray(d["x"], float), np.asarray(d["y"], float),
                            np.asarray(d["heading"], float))
-        skip = {"id", "source", "length", "s", "x", "y", "heading"}
+        skip = {"id", "source", "length", "s", "x", "y", "heading", "meta"}
+        r.meta = d.get("meta") or {}
         r.data = {k: np.asarray([np.nan if v is None else v for v in vals], float)
                   for k, vals in d.items() if k not in skip}
         out.append(r)
@@ -569,7 +606,15 @@ def step_export(project: Project, cfg: dict, progress: Progress,
         "scan": project.meta.get("scan"), "ground_points": n_pts,
         "files": sorted(str(p.relative_to(out)) for p in out.iterdir() if p.is_file()),
     }
+    # check the .xodr as a simulator would read it, replaying the car's own path
+    from uga_terrain import xodr_check
+    chk = xodr_check.check(out / ("%s.xodr" % name), [out / "trajectory.csv"])
+    export.save_json(chk, out / "xodr_check.json")
+    summary["xodr_check"] = chk["counts"]
     export.save_json(summary, out / "summary.json")
+    for f in chk["findings"]:
+        if f["level"] != "info":
+            progress.note("OpenDRIVE check %s%s: %s" % (f["level"], " (road %s)" % f["road"] if f["road"] else "", f["msg"]))
     progress.set("export", 5, 5, "done")
     return summary
 

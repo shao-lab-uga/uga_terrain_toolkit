@@ -295,6 +295,8 @@ def road_json(roads: Sequence[Road], every: int = 1) -> List[dict]:
              "heading": np.round(r.heading[sel], 4).tolist()}
         for k, v in r.data.items():
             d[k] = [None if not np.isfinite(a) else round(float(a), 4) for a in v[sel]]
+        if r.meta:
+            d["meta"] = r.meta
         out.append(d)
     return out
 
