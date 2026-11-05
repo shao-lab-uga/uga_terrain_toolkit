@@ -273,13 +273,16 @@ def layout(road: Road, lines: List[dict], cfg: dict) -> dict:
                        "contrast": round(ln["contrast"], 3)} for m, _, ln in keep]}
 
 
-def detect(road: Road, scans_fn, cfg: dict) -> dict:
-    """Find painted lines on one road and lay out its lanes."""
+def detect(road: Road, scans_fn, cfg: dict, blank=()) -> dict:
+    """Find painted lines on one road and lay out its lanes. ``blank``: (s0, s1)
+    stretches to ignore (the inside of a junction: crosswalks, stop bars)."""
     rc = cfg.get("roads") or {}
     lc = cfg.get("lanes") or {}
     hw = float(np.nanmax(np.r_[road.data.get("road_l", [3.0]), road.data.get("road_r", [3.0]), 3.0])) + 1.0
     hw = min(hw, float(rc.get("half_width") or 25.0))
     img = intensity_image(road, scans_fn(), hw, float(lc.get("paint_range", 20.0)))
+    for s0, s1 in blank:
+        img[max(0, int((s0 - road.s[0]) / DS)):max(0, int(math.ceil((s1 - road.s[0]) / DS)) + 1)] = np.nan
     step = float(rc.get("station_step") or 1.0)
     e_l = _smooth_edge(road.data.get("road_l", np.full(len(road.s), np.nan)), 1.75, step)
     e_r = -_smooth_edge(road.data.get("road_r", np.full(len(road.s), np.nan)), 1.75, step)

@@ -94,8 +94,10 @@ python -m uga_terrain build --name campus --start roads     # redo roads + expor
 3. **Ground.** Patchwork++ separates ground from objects in each scan, and the car's own body is masked out.
 4. **Map.** Ground points from all drives go into a 20 cm × 10 cm voxel grid. Each cell keeps its dominant height, which drops cars and people that passed by. Raised blobs left over (parked cars, bins) are removed, and small holes are filled.
 5. **Surface layers.** Elevation, slope, aspect and roughness (plane-fit RMS plus point spread) are computed per cell.
-6. **Roads.** Cross-sections every metre along each drive find the road edges (curb, drop, rough or steep ground) and the curb height. Past each edge they find the verge and the sidewalk (a smooth, flat, raised strip). Banking and grade come from the surface itself, and the car's own roll and pitch are kept for comparison.
-7. **Export.** OpenDRIVE, CSV, PLY and raster files are written.
+6. **Lining up drives.** When a map has several recordings, each one is matched to the ones before it on the ground they share: sideways and heading from the lane paint and crosswalks (lidar intensity), height and tilt from the road surface. GNSS alone leaves drives of the same street tens of centimetres and about a degree apart (`register:` in the settings; result in `align.json`).
+7. **Junctions.** A drive that turns marks a junction where the straight lines before and after the turn meet; a road edge that opens up on one or both sides marks a side street nobody turned into. Drives are cut at each junction's edge.
+8. **Roads.** The pieces outside junctions become roads; the same street driven more than once, in either direction, is one road. Cross-sections every metre find the road edges (curb, drop, rough or steep ground) and the curb height. Past each edge they find the verge and the sidewalk (a smooth, flat, raised strip). Banking and grade come from the surface itself, and the car's own roll and pitch are kept for comparison.
+9. **Export.** OpenDRIVE, CSV, PLY and raster files are written.
 
 All tuning values are in `configs/default.yaml`. Changes made in the app go to `configs/local.yaml`.
 
@@ -107,12 +109,15 @@ Some i7/i9 13th and 14th-gen CPUs were damaged by a voltage fault and give rando
 
 **Lanes.** Lane paint reflects the lidar much more strongly than asphalt. The app builds a road-aligned image of relative lidar intensity, finds the thin bright stripes in it, links them into lines along the road and fits each with a smooth curve. Lanes are the strips between neighbouring boundaries (curb, lines, curb). The painted line nearest the middle of the road is taken as the centre line between the two directions, and the .xodr reference line is placed on it. Driving lanes keep a steady width; where the curb moves away (turn pockets, side streets, parking) the extra width becomes a shoulder lane. Without paint, the paved width is split evenly. The lidar cannot see paint colour, so the centre line is written as yellow and other lines as white.
 
+**Junctions.** Every road that ends at a junction is linked to it, and every movement between two of its roads (straight on, left, right; no U-turns) gets a connecting road with one lane. Which lane connects to which: right turns from the rightmost lane to the rightmost lane, left turns from the leftmost to the leftmost, straight on lane by lane from the right. A connecting lane starts and ends exactly on the edges of the lanes it joins. Where a drive made the movement, the lane follows the driven path; otherwise it is a smooth curve, and its name ends in "(not driven)" so turns that are not allowed can be found and deleted (or set `junctions.movements: driven`). The elevation inside the junction follows the measured ground. Two roads that continue each other straight through a junction are one street: their lanes are found together, so the centre line and lane widths match on both sides.
+
 **Checks.** After every export the .xodr is read back by the app's own OpenDRIVE reader (`uga_terrain/xodr_check.py`) and checked:
 
 - **Format:** ids, geometry lengths and joins, profile records, lane ids and widths, links between roads, junction connections and lane links.
 - **Lanes:** driving lane widths are plausible (2.5–4.6 m) and steady along the road.
 - **Network:** roads with no connection, separate pieces of network.
-- **Replay:** the car's own trajectory is placed onto the map: share of poses inside a driving lane, lane changes, distance from the lane centre, heading against the lane direction, and vehicle height against the road surface.
+- **Lane links:** linked lanes really meet where their roads join (no gap between a lane and the connecting lane it links to).
+- **Replay:** each recording's trajectory is placed onto the map lane by lane, following the map's lane links through junctions: share of poses inside a driving lane, the route of lanes used, lane changes, moves between lanes the map does not connect, distance from the lane centre, heading against the lane direction, and vehicle height against the road surface.
 
 Results are in `xodr_check.json` and on the **Accuracy** tab. Any .xodr can be checked from the command line, with any trajectory in the map's x/y frame:
 

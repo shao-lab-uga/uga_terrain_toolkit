@@ -227,12 +227,13 @@ $("import-file").addEventListener("change", guard(async (e) => {
 }));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
-  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.road = null;
+  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.road = null;
   if (S.three) { S.three.dispose(); S.three = null; }
   if (S.summary) {
     S.previews = await api(`/api/maps/${S.map}/previews`);
     S.roads = await api(`/api/maps/${S.map}/roads`);
     S.drives = await api(`/api/maps/${S.map}/drives`);
+    S.junctions = (await api(`/api/maps/${S.map}/junctions`)) || [];
     if (S.roads.length) S.road = S.roads[0].id;
   }
   S.view = null;
@@ -405,6 +406,20 @@ function drawMap() {
     ctx.setLineDash([]);
   }
   if ($("show-roads").checked) {
+    for (const j of S.junctions || []) {
+      const [cx, cy] = toPx(j.x, j.y);
+      const [ex, ey] = toPx(j.x + j.r, j.y);
+      ctx.lineWidth = 2 * devicePixelRatio;
+      ctx.strokeStyle = "rgba(214,120,0,.9)";
+      ctx.setLineDash([6 * devicePixelRatio, 4 * devicePixelRatio]);
+      ctx.beginPath(); ctx.arc(cx, cy, Math.hypot(ex - cx, ey - cy), 0, 2 * Math.PI); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = `600 ${12 * devicePixelRatio}px system-ui`;
+      ctx.lineWidth = 3 * devicePixelRatio; ctx.strokeStyle = "rgba(255,255,255,.9)";
+      ctx.strokeText(`Junction ${j.id}`, cx + 6, cy);
+      ctx.fillStyle = "#b35f00";
+      ctx.fillText(`Junction ${j.id}`, cx + 6, cy);
+    }
     for (const r of S.roads) {
       ctx.lineWidth = (r.id === S.road ? 4 : 2.5) * devicePixelRatio;
       ctx.strokeStyle = r.id === S.road ? "#b5121b" : "rgba(181,18,27,.6)";
@@ -763,11 +778,23 @@ async function loadXodrCheck() {
     row("Inside a driving lane", fmt(r.in_driving_lane_pct, 0) + " %");
     row("Lanes used", (r.lanes_used || []).map((s) => { const [rd, ln] = s.split(":"); return `${roadName(Number(rd))} lane ${ln}`; }).join(", ") || "–");
     row("Lane changes", r.lane_changes ?? "–");
+    row("Moves between lanes the map does not connect", (r.unlinked_moves || []).length ? r.unlinked_moves.join("; ") : "none");
     row("Distance from lane centre (median / 95 %)", r.lane_centre_offset_median_m != null ? `${fmt(r.lane_centre_offset_median_m)} m / ${fmt(r.lane_centre_offset_p95_m)} m` : "–");
     row("Heading vs lane direction (median)", r.heading_error_median_deg != null ? fmt(r.heading_error_median_deg, 1) + "°" : "–");
     row("Driving against the lane direction", r.wrong_way_pct != null ? fmt(r.wrong_way_pct, 0) + " %" : "–");
     row("Vehicle height above the road surface (median / 10–90 % spread)", r.height_vs_road_median_m != null ? `${cm(r.height_vs_road_median_m)} / ${cm(r.height_vs_road_spread_m)}` : "–");
     B.append(el("h4", {}, `Replaying the car's own drive (${r.trajectory}) onto the map`), el("div", { class: "table-wrap" }, t));
+  }
+  for (const j of x.junctions || []) {
+    const t = el("table");
+    t.append(el("tr", {}, ...["From", "To", "Lanes (from → connecting lane)", "Connecting road"].map((h) => el("th", {}, h))));
+    for (const c of j.connections) {
+      t.append(el("tr", {}, ...[roadName(Number(c.incoming)), c.outgoing ? roadName(Number(c.outgoing)) : "–",
+        c.lanes.map(([a, b]) => `${a} → ${b}`).join(", "), c.name || c.connecting].map((v) => el("td", {}, v))));
+    }
+    B.append(el("h4", {}, `Junction ${j.id}: which lane connects to which`),
+      el("p", { class: "muted help" }, "Each row is one connecting lane through the intersection. Turns marked \"not driven\" were added so every movement between the roads exists; delete them where a turn is not allowed."),
+      el("div", { class: "table-wrap" }, t));
   }
   if ((x.lane_widths || []).length) {
     const t = el("table");

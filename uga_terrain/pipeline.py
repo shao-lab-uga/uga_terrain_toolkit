@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import time
@@ -23,7 +24,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from uga_terrain import export, geo, poses, roads as roads_mod, xodr
+from uga_terrain import export, geo, junctions as junctions_mod, poses, register, roads as roads_mod, xodr
 from uga_terrain.accumulate import VoxelAccumulator
 from uga_terrain.config import work_dir
 from uga_terrain.grid import TerrainGrid
@@ -137,7 +138,7 @@ def list_projects(cfg: dict) -> List[dict]:
 # --- step 1: scan --------------------------------------------------------------------------
 
 _SCAN_KEYS = ("topics", "frames", "pose", "lidar", "odometry", "ground")
-SCAN_VERSION = 3   # bump when scan output changes, so old caches are rebuilt
+SCAN_VERSION = 4   # bump when scan output changes, so old caches are rebuilt
 
 
 def clean_range(r) -> Optional[dict]:
@@ -220,7 +221,7 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
         raise RuntimeError("%s: no GNSS fixes on %s" % (
             Path(path).name, ", ".join(poses.navsat_candidates(cfg))))
     if nav_topic != topics.get("navsat"):
-        progress.note("%s: GNSS read from %s (%s not in this recording)"
+        progress.note("%s: GNSS read from %s (%s is missing or stops early in this recording)"
                       % (Path(path).name, nav_topic, topics.get("navsat")))
     track = poses.build_track(fixes, imus, origin, cfg)
     yi = getattr(track, "yaw_info", {}) or {}
@@ -433,11 +434,16 @@ def step_map(project: Project, cfg: dict, progress: Progress) -> TerrainGrid:
     g = cfg.get("grid") or {}
     acc = VoxelAccumulator(float(g.get("cell") or 0.2), float(g.get("z_bin") or 0.1))
     recs = project.recordings
+    align = {}
+    if len(recs) > 1:
+        align = register.align_project(project, cfg, progress)
+        for i, rec in enumerate(recs):
+            if str(i) in align and i > 0:
+                progress.note("Lining up drives: " + register.summary_text(Path(rec).name, align[str(i)]))
     for i in range(len(recs)):
-        fz = project.cache(i) / "frames.npz"
-        if not fz.is_file():
+        T = register.poses_of(project, i, align)
+        if T is None:
             continue
-        T = np.load(fz)["T"]
         for k in range(len(T)):
             if k % 20 == 0:
                 progress.set("merge ground", k, len(T), "[%d/%d] frame %d" % (i + 1, len(recs), k))
@@ -466,54 +472,210 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
     for t in grid.tiles.values():      # labels are recomputed from scratch
         t["label"] = np.where(np.isfinite(t["z"]), 4, 0).astype(np.float32)
     paths, frames = [], {}
+    align = register.load(project)
     for i, rec in enumerate(project.recordings):
-        fz = project.cache(i) / "frames.npz"
-        if not fz.is_file():
+        T = register.poses_of(project, i, align)
+        if T is None:
             continue
-        T = np.load(fz)["T"]
         name = "%d:%s" % (i, Path(rec).name)
         paths.append((name, T[:, :2, 3]))
         frames[name] = T
     progress.set("find roads", 0, 1, "%d drives" % len(paths))
-    found = roads_mod.split_roads(paths, cfg)
+    juncs = junctions_mod.find(paths, cfg)
+
+    def analyse(found):
+        for j, r in enumerate(found):
+            progress.set("find roads", j, len(found), "road %d, %.0f m" % (r.id, r.length))
+            progress.check()
+            T = frames[r.source]
+            xy = T[:, :2, 3]
+            idx = np.empty(len(r.s), np.int64)
+            for a in range(0, len(r.s), 512):
+                P = np.stack([r.x[a:a + 512], r.y[a:a + 512]], 1)
+                idx[a:a + 512] = np.argmin(((P[:, None, :] - xy[None, :, :]) ** 2).sum(-1), 1)
+            rpy = geo.mat_to_rpy(T[idx, :3, :3])
+            roads_mod.analyse_road(r, grid, cfg, vehicle_rpy=(rpy[:, 0], rpy[:, 1]))
+    for attempt in range(2):
+        pieces, passes = junctions_mod.cut(paths, juncs)
+        found = roads_mod.split_roads(pieces, cfg)
+        analyse(found)
+        # a side street the drives went straight past shows as the road edge
+        # opening up on one or both sides
+        new = junctions_mod.openings(found, juncs, cfg) if attempt == 0 else []
+        if not new:
+            break
+        juncs = juncs + new
+    _driven_movements(juncs, found, passes)
+    for jn in juncs:
+        legs = [r.id for r in found if jn.id in (r.meta.get("junction_start"), r.meta.get("junction_end"))]
+        progress.note("Junction %d (%s): %d roads meet there%s." % (
+            jn.id, ", ".join(jn.why), len(legs),
+            "; driven: " + ", ".join("road %s to road %s" % tuple(k.split(">")) for k in jn.movements)
+            if jn.movements else ""))
+    export.save_json([jn.to_json() for jn in juncs], project.root / "junctions.json")
     for j, r in enumerate(found):
-        progress.set("find roads", j, len(found), "road %d, %.0f m" % (r.id, r.length))
-        progress.check()
-        T = frames[r.source]
-        xy = T[:, :2, 3]
-        idx = np.empty(len(r.s), np.int64)
-        for a in range(0, len(r.s), 512):
-            P = np.stack([r.x[a:a + 512], r.y[a:a + 512]], 1)
-            idx[a:a + 512] = np.argmin(((P[:, None, :] - xy[None, :, :]) ** 2).sum(-1), 1)
-        rpy = geo.mat_to_rpy(T[idx, :3, :3])
-        roads_mod.analyse_road(r, grid, cfg, vehicle_rpy=(rpy[:, 0], rpy[:, 1]))
         roads_mod.paint_labels(r, grid)
         if (cfg.get("lanes") or {}).get("detect_paint", True):
             progress.set("find lanes", j, len(found), "road %d: looking for lane paint" % r.id)
-            _detect_lanes(project, r, T, cfg, progress)
+            _detect_lanes(project, r, frames, cfg, progress)
+    if (cfg.get("lanes") or {}).get("detect_paint", True):
+        _street_lanes(project, found, juncs, frames, cfg, progress)
     gdir = project.root / "grid"
     grid.save(gdir)
     export.save_json(export.road_json(found), project.root / "roads.json")
     return grid, found
 
 
-def _detect_lanes(project: Project, road, T: np.ndarray, cfg: dict, progress: Progress) -> None:
-    """Lane lines from lidar intensity; the lane model goes into road.data
-    (boundaries lb0..lbN) and road.meta["lanes"]."""
+def _driven_movements(juncs, found, passes) -> None:
+    """Which leg a drive came in on and which it left by, per junction."""
+    for jn in juncs:
+        legs = []
+        for r in found:
+            if r.meta.get("junction_end") == jn.id:
+                legs.append((r.id, float(r.heading[-1])))            # heading into the junction
+            if r.meta.get("junction_start") == jn.id:
+                legs.append((r.id, float(r.heading[0]) + math.pi))
+        if len(legs) < 2:
+            continue
+        for jid, h_in, h_out, _name, pxy in passes:
+            if jid != jn.id:
+                continue
+            a = min(legs, key=lambda l: abs(math.remainder(l[1] - h_in, 2 * math.pi)))
+            b = min(legs, key=lambda l: abs(math.remainder(l[1] + math.pi - h_out, 2 * math.pi)))
+            if a[0] != b[0] and abs(math.remainder(a[1] - h_in, 2 * math.pi)) < math.radians(45) \
+                    and abs(math.remainder(b[1] + math.pi - h_out, 2 * math.pi)) < math.radians(45):
+                k = "%d>%d" % (a[0], b[0])
+                jn.movements[k] = jn.movements.get(k, 0) + 1
+                jn.paths.setdefault(k, np.round(np.asarray(pxy, float), 3).tolist())
+
+
+def _street_lanes(project: Project, found, juncs, frames: dict, cfg: dict, progress: Progress) -> None:
+    """One lane model per street through a junction: two legs that continue
+    each other (straight on) get their lanes found together, so the centre
+    line and lane widths match on both sides of the junction."""
     from uga_terrain import lanes
-    rec = int(road.source.split(":", 1)[0])
-    fdir = project.cache(rec) / "frames"
+    step = float((cfg.get("roads") or {}).get("station_step") or 1.0)
+    done = set()
+    for jn in juncs:
+        legs = []
+        for r in found:
+            for contact in ("start", "end"):
+                if r.meta.get("junction_" + contact) == jn.id:
+                    h_in = float(r.heading[-1]) if contact == "end" else float(r.heading[0]) + math.pi
+                    legs.append((r, contact, h_in))
+        pairs = []
+        for A, ca, ha in legs:
+            for B, cb, hb in legs:
+                if A is B:
+                    continue
+                dev = abs(math.remainder((hb + math.pi) - ha, 2 * math.pi))
+                if dev < math.radians(25):
+                    pairs.append((dev, A, ca, B, cb))
+        for dev, A, ca, B, cb in sorted(pairs, key=lambda p: p[0]):
+            if A.id in done or B.id in done:
+                continue
+            # A in travel order towards the junction, B away from it
+            fa, fb = ca == "start", cb == "end"
+            ax, ay, ah = (A.x[::-1], A.y[::-1], A.heading[::-1] + math.pi) if fa else (A.x, A.y, A.heading)
+            bx, by, bh = (B.x[::-1], B.y[::-1], B.heading[::-1] + math.pi) if fb else (B.x, B.y, B.heading)
+
+            def side(r, flip):
+                rl = r.data.get("road_l", np.full(len(r.s), np.nan))
+                rr = r.data.get("road_r", np.full(len(r.s), np.nan))
+                return (rr[::-1], rl[::-1]) if flip else (rl, rr)
+            al, ar = side(A, fa)
+            bl, br = side(B, fb)
+            gap = math.hypot(bx[0] - ax[-1], by[0] - ay[-1])
+            nb = max(1, int(round(gap / step)))
+            f = np.arange(1, nb) / nb
+            gx = ax[-1] + f * (bx[0] - ax[-1])
+            gy = ay[-1] + f * (by[0] - ay[-1])
+            gh = np.full(len(f), math.atan2(by[0] - ay[-1], bx[0] - ax[-1]))
+            x = np.concatenate([ax, gx, bx])
+            y = np.concatenate([ay, gy, by])
+            h = np.unwrap(np.concatenate([ah, gh, bh]))
+            s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+            nan = np.full(len(f), np.nan)
+            street = roads_mod.Road(-1, A.source, s, x, y, h,
+                                    {"road_l": np.concatenate([al, nan, bl]),
+                                     "road_r": np.concatenate([ar, nan, br])})
+            na = len(ax)
+            n_gap = len(f)
+            P = np.stack([x, y], 1)
+            lo, hi = P.min(0) - 45.0, P.max(0) + 45.0
+            rng = float((cfg.get("lanes") or {}).get("paint_range", 20.0)) + 5.0
+
+            def scans():
+                for name, T in frames.items():
+                    fdir = project.cache(int(name.split(":", 1)[0])) / "frames"
+                    for k in range(len(T)):
+                        c = T[k, :2, 3]
+                        if not ((c >= lo).all() and (c <= hi).all()):
+                            continue
+                        if np.min(np.hypot(P[:, 0] - c[0], P[:, 1] - c[1])) > rng:
+                            continue
+                        fp = fdir / ("%06d.npy" % k)
+                        if fp.is_file():
+                            g = np.load(fp)
+                            if g.shape[1] >= 4:
+                                yield T[k], g
+            progress.set("find lanes", 0, 1, "street through junction %d: roads %d and %d" % (jn.id, A.id, B.id))
+            try:
+                lay = lanes.detect(street, scans, cfg, blank=[(s[na - 1] + 0.5, s[na + n_gap] - 0.5)])
+            except Exception as e:
+                progress.note("Roads %d and %d: joint lane detection failed (%s)." % (A.id, B.id, e))
+                continue
+            bounds = lay.pop("bounds")
+            for r, sl, flip in ((A, slice(0, na), fa), (B, slice(na + n_gap, len(s)), fb)):
+                bs = [b[sl] for b in bounds]
+                types, marks, centre = list(lay["types"]), list(lay["marks"]), int(lay["centre"])
+                if flip:
+                    bs = [-b[::-1] for b in reversed(bs)]
+                    types, marks = types[::-1], marks[::-1]
+                    centre = len(bs) - 1 - centre
+                for k in [k for k in r.data if k.startswith("lb")]:
+                    del r.data[k]
+                for k, b in enumerate(bs):
+                    r.data["lb%d" % k] = b
+                r.meta["lanes"] = dict(lay, types=types, marks=marks, centre=centre,
+                                       street_with=(B.id if r is A else A.id))
+            done.update((A.id, B.id))
+            n_drive = sum(t == "driving" for t in lay["types"])
+            progress.note("Roads %d and %d are one street through junction %d: %d driving lane(s), %s." % (
+                A.id, B.id, jn.id, n_drive, "from %d painted line(s)" % len(lay["lines"])
+                if lay["source"] == "paint" else "no lane paint found, so the width is split evenly"))
+
+
+def load_junctions(project: Project):
+    f = project.root / "junctions.json"
+    if not f.is_file():
+        return []
+    return [junctions_mod.Junction.from_json(d) for d in json.loads(f.read_text())]
+
+
+def _detect_lanes(project: Project, road, frames: dict, cfg: dict, progress: Progress) -> None:
+    """Lane lines from lidar intensity, using every drive that saw the road;
+    the lane model goes into road.data (boundaries lb0..lbN) and road.meta["lanes"]."""
+    from uga_terrain import lanes
     lo = np.array([road.x.min(), road.y.min()]) - 45.0
     hi = np.array([road.x.max(), road.y.max()]) + 45.0
+    rng = float((cfg.get("lanes") or {}).get("paint_range", 20.0)) + 5.0
+    P = np.stack([road.x, road.y], 1)
 
     def scans():
-        for k in range(len(T)):
-            c = T[k, :2, 3]
-            f = fdir / ("%06d.npy" % k)
-            if (c >= lo).all() and (c <= hi).all() and f.is_file():
-                g = np.load(f)
-                if g.shape[1] >= 4:
-                    yield T[k], g
+        for name, T in frames.items():
+            fdir = project.cache(int(name.split(":", 1)[0])) / "frames"
+            for k in range(len(T)):
+                c = T[k, :2, 3]
+                if not ((c >= lo).all() and (c <= hi).all()):
+                    continue
+                if np.min(np.hypot(P[:, 0] - c[0], P[:, 1] - c[1])) > rng:
+                    continue
+                f = fdir / ("%06d.npy" % k)
+                if f.is_file():
+                    g = np.load(f)
+                    if g.shape[1] >= 4:
+                        yield T[k], g
     try:
         lay = lanes.detect(road, scans, cfg)
     except Exception as e:  # keep the build going with evenly split lanes
@@ -559,7 +721,8 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     progress.set("export", 0, 5, "OpenDRIVE")
     name = _slug(project.name)
     names = project.road_names()
-    xinfo = xodr.write_xodr(found, origin, cfg, out / ("%s.xodr" % name), name=name, road_names=names)
+    xinfo = xodr.write_xodr(found, origin, cfg, out / ("%s.xodr" % name), name=name, road_names=names,
+                            junctions=load_junctions(project), ground=lambda x, y: grid.sample(x, y, "z"))
     progress.set("export", 1, 5, "road profile CSV")
     export.write_profile_csv(found, out / "road_profile.csv")
     rows = []
@@ -567,7 +730,8 @@ def step_export(project: Project, cfg: dict, progress: Progress,
         fz = project.cache(i) / "frames.npz"
         if not fz.is_file():
             continue
-        d = np.load(fz)
+        d = dict(np.load(fz))
+        d["T"] = register.poses_of(project, i)
         rpy = np.degrees(geo.mat_to_rpy(d["T"][:, :3, :3]))
         for k in range(len(d["t"])):
             rows.append({"recording": Path(rec).name, "frame": k, "t": "%.6f" % d["t"][k],

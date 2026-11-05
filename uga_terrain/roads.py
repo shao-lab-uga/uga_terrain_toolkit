@@ -9,8 +9,8 @@ verge. The result per station is what OpenDRIVE needs: road widths each side
 of the reference line, curb heights, verge and sidewalk widths, elevation,
 grade and banking.
 
-Repeated passes over the same street (another recording, or a loop) feed the
-elevation map but do not create a second road.
+Repeated passes over the same street (another recording, or a loop, in either
+direction) feed the elevation map but do not create a second road.
 """
 from __future__ import annotations
 
@@ -88,24 +88,31 @@ def resample_path(xy: np.ndarray, step: float, smooth_m: float = 3.0):
 
 
 class _Hash:
+    """Points of the roads found so far, for "is this street already a road?"."""
+
     def __init__(self, cell: float):
         self.cell = cell
         self.buckets: Dict[tuple, List[np.ndarray]] = {}
 
-    def add(self, xy: np.ndarray) -> None:
+    def add(self, xy: np.ndarray, h: np.ndarray) -> None:
         keys = np.floor(xy / self.cell).astype(np.int64)
+        P = np.c_[xy, h]
         for k in np.unique(keys, axis=0):
             sel = np.all(keys == k, axis=1)
-            self.buckets.setdefault((int(k[0]), int(k[1])), []).append(xy[sel])
+            self.buckets.setdefault((int(k[0]), int(k[1])), []).append(P[sel])
 
-    def near(self, xy: np.ndarray, dist: float) -> np.ndarray:
+    def near(self, xy: np.ndarray, h: np.ndarray, dist: float, max_angle: float = 30.0) -> np.ndarray:
+        """True where a stored point is within ``dist`` and runs along the same
+        line (either direction)."""
         out = np.zeros(len(xy), bool)
         keys = np.floor(xy / self.cell).astype(np.int64)
+        cmax = math.cos(math.radians(max_angle))
         for i, (k, p) in enumerate(zip(keys, xy)):
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for arr in self.buckets.get((int(k[0]) + dx, int(k[1]) + dy), ()):
-                        if np.any(np.hypot(arr[:, 0] - p[0], arr[:, 1] - p[1]) < dist):
+                        m = np.hypot(arr[:, 0] - p[0], arr[:, 1] - p[1]) < dist
+                        if m.any() and np.any(np.abs(np.cos(arr[m, 2] - h[i])) >= cmax):
                             out[i] = True
                             break
                     if out[i]:
@@ -116,20 +123,33 @@ class _Hash:
 
 
 def split_roads(paths: Sequence[tuple], cfg: dict) -> List[Road]:
-    """paths: [(name, xy (N,2))] in drive order -> non-overlapping road pieces."""
+    """paths: [(name, xy (N,2)[, start junction, end junction])] -> roads.
+
+    The longest pieces go first, so a street driven several times becomes one
+    road along its longest drive; later pieces only add the parts no earlier
+    road covers (within ``dedup_dist``, running the same way or opposite).
+    The junction ids end up in ``road.meta`` ("junction_start"/"junction_end")
+    for the road ends that touch them."""
     rc = cfg.get("roads") or {}
     step = float(rc.get("station_step") or 1.0)
-    dedup = float(rc.get("dedup_dist") or 3.0)
+    dedup = float(rc.get("dedup_dist") or 6.0)
     min_len = float(rc.get("min_road_length") or 15.0)
     hsh = _Hash(max(dedup, 5.0))
     roads: List[Road] = []
-    for name, xy in paths:
+    items = []
+    for p in paths:
+        name, xy = p[0], np.asarray(p[1], float)
+        js, je = (p[2], p[3]) if len(p) >= 4 else (None, None)
+        L = float(np.sum(np.hypot(*np.diff(xy, axis=0).T))) if len(xy) > 1 else 0.0
+        items.append((L, name, xy, js, je))
+    items.sort(key=lambda it: -it[0])
+    for _L, name, xy, js, je in items:
         rs = resample_path(xy, step)
         if rs is None:
             continue
         s, x, y, h = rs
         pts = np.stack([x, y], 1)
-        dup = hsh.near(pts, dedup)
+        dup = hsh.near(pts, h, dedup)
         # the same drive coming back over itself (a loop) counts as a repeat too
         own = np.zeros(len(pts), bool)
         gap = int(30.0 / step)
@@ -140,11 +160,19 @@ def split_roads(paths: Sequence[tuple], cfg: dict) -> List[Road]:
         dup |= own
         runs = np.flatnonzero(np.diff(np.concatenate([[1], dup.astype(int), [1]])))
         for a, b in zip(runs[::2], runs[1::2]):
-            if b - a < 2 or (s[b - 1] - s[a]) < min_len:
+            # a short piece is still a road when it leads into a junction
+            # (the street continues past it, the recording just ends)
+            touches = (a == 0 and js is not None) or (b == len(s) and je is not None)
+            if b - a < 2 or (s[b - 1] - s[a]) < (min(min_len, 5.0) if touches else min_len):
                 continue
             sl = slice(a, b)
-            roads.append(Road(len(roads) + 1, name, s[sl] - s[a], x[sl], y[sl], h[sl]))
-        hsh.add(pts)
+            r = Road(len(roads) + 1, name, s[sl] - s[a], x[sl], y[sl], h[sl])
+            if a == 0 and js is not None:
+                r.meta["junction_start"] = int(js)
+            if b == len(s) and je is not None:
+                r.meta["junction_end"] = int(je)
+            roads.append(r)
+        hsh.add(pts, h)
     return roads
 
 
@@ -175,14 +203,21 @@ def _side(z, rough, slope, t, rc) -> dict:
     if near.sum() >= 3:
         slope_c = float(np.polyfit(t[: max(min_j, 3)][near], z[: max(min_j, 3)][near], 1)[0])
     zd = z - slope_c * t
+    # some asphalt is coarser than others: the road counts as rough only when
+    # clearly rougher than the surface the car drove on
+    r_near = rough[: max(min_j, 3)]
+    r_near = r_near[np.isfinite(r_near)]
+    if len(r_near) >= 3:
+        rough_max = max(rough_max, 1.5 * float(np.median(r_near)))
     edge, kind, curb_h, j_after = n - 1, "limit", 0.0, None
     edge_z = None
     miss = 0
     # a rough or steep patch right at the road's edge (gutter, drain grate,
-    # worn asphalt) often sits just in front of the curb: remember it and keep
-    # looking ~1 m further for a curb step before settling for it
+    # worn asphalt, a gutter channel up to ~2 m wide) often sits just in front
+    # of the curb: remember it and keep looking 2 m further for a curb step
+    # before settling for it
     pending = None
-    ahead = max(1, int(round(1.0 / dt)))
+    ahead = max(1, int(round(2.0 / dt)))
     for j in range(1, n):
         if pending is not None and j > pending[0] + ahead:
             break
@@ -306,6 +341,18 @@ def analyse_road(road: Road, grid: TerrainGrid, cfg: dict,
             res["walk_" + side][i] = o["walk_w"]
             res["walk_h_" + side][i] = o["walk_h"]
             res["edge_" + side][i] = EDGE_NAMES.index(o["edge"])
+    # a curb is the most reliable road edge. Where most of one side ends at a
+    # curb, stations that stopped short of it for another reason (a parked
+    # bike, leaves, a drain grate read as rough) take the curb's position
+    # from their neighbours instead
+    for side in ("l", "r"):
+        e = res["edge_" + side]
+        w_ = res["road_" + side]
+        is_curb = e == EDGE_NAMES.index("curb")
+        if is_curb.sum() >= max(3, 0.3 * M) and M > 2:
+            cw = np.interp(road.s, road.s[is_curb], w_[is_curb])
+            short = (~is_curb) & (w_ < cw - 0.5) & (e != EDGE_NAMES.index("drop"))
+            res["road_" + side] = np.where(short, cw, w_)
     w = max(1, int(round(float(rc.get("smooth_m") or 5.0) / step)))
     for k in ("road_l", "road_r", "curb_h_l", "curb_h_r", "verge_l", "verge_r",
               "walk_l", "walk_r", "walk_h_l", "walk_h_r"):

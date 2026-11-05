@@ -39,7 +39,8 @@ def load_scans(project, max_points: Optional[int] = None):
         fz = cd / "frames.npz"
         if not fz.is_file():
             continue
-        T = np.load(fz)["T"]
+        from uga_terrain import register
+        T = register.poses_of(project, i)
         for k in range(len(T)):
             f = cd / "frames" / ("%06d.npy" % k)
             if not f.is_file():

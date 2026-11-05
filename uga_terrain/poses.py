@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -92,6 +92,19 @@ def navsat_candidates(cfg: dict) -> List[str]:
     return out + [t for t in NAVSAT_FALLBACKS if t not in out]
 
 
+def pick_navsat(fixes: Dict[str, list], order: Sequence[str]) -> str:
+    """The first topic in ``order`` that covers (nearly) as much time as the
+    best one. Some recordings carry a GNSS topic that stops part-way (e.g.
+    /oxts/fix ending seconds before /oxts/fix_raw); frames after its end
+    would have no position."""
+    span = {k: (max(v)[0] - min(v)[0]) if len(v) > 1 else 0.0 for k, v in fixes.items()}
+    best = max(span.values(), default=0.0)
+    for k in order:
+        if fixes.get(k) and span[k] >= best - 0.5:
+            return k
+    return next((k for k in order if fixes.get(k)), order[0] if order else "")
+
+
 def read_gnss_imu(path: str, cfg: dict):
     """Returns (fixes (N,4) t/lat/lon/alt, imus (M,5) t/x/y/z/w, navsat topic used)."""
     topics = cfg.get("topics") or {}
@@ -115,7 +128,7 @@ def read_gnss_imu(path: str, cfg: dict):
             if not np.isfinite(q).all() or abs(np.linalg.norm(q) - 1.0) > 0.1:
                 continue
             imus.append((t,) + (_frd_to_flu(q) if frd else q))
-    used = next((k for k in nav_ts if fixes[k]), nav_ts[0] if nav_ts else "")
+    used = pick_navsat(fixes, nav_ts)
     return (np.asarray(sorted(fixes.get(used, [])), float).reshape(-1, 4),
             np.asarray(sorted(imus), float).reshape(-1, 5), used)
 

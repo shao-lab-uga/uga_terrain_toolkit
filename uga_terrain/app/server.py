@@ -285,7 +285,7 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         rd = [r for r in pipeline.load_roads(p) if r.id == road]
         if not rd:
             raise HTTPException(404, "no road %d" % road)
-        fz = [p.cache(i) / "frames.npz" for i in range(len(p.recordings))]
+        fz = [p.cache(i) / "frames.npz" for i in range(len(p.recordings))] + [p.root / "align.json"]
         key = (str(p.root),) + tuple(f.stat().st_mtime if f.is_file() else 0 for f in fz)
         if key not in scans:
             scans.clear()
@@ -333,6 +333,13 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         f = project(slug).root / "roads.json"
         return Response(f.read_text() if f.is_file() else "[]", media_type="application/json")
 
+    @app.get("/api/maps/{slug}/junctions")
+    def junctions(slug: str):
+        f = project(slug).root / "junctions.json"
+        if not f.is_file():
+            return []
+        return [{k: v for k, v in j.items() if k != "paths"} for j in json.loads(f.read_text())]
+
     @app.get("/api/maps/{slug}/drives")
     def drives(slug: str):
         p = project(slug)
@@ -341,7 +348,8 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             fz = p.cache(i) / "frames.npz"
             if not fz.is_file():
                 continue
-            T = np.load(fz)["T"]
+            from uga_terrain import register
+            T = register.poses_of(p, i)
             step = max(1, len(T) // 3000)
             out.append({"recording": Path(rec).name,
                         "x": np.round(T[::step, 0, 3], 2).tolist(),

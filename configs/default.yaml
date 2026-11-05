@@ -67,6 +67,13 @@ grid:
   object_window_m: 8.0   # cells this much above the surface around them ...
   object_height: 0.4     # ... (metres) are objects, not ground
 
+register:                 # line up several recordings of the same place with each other
+  enabled: true
+  max_shift: 2.5          # largest sideways correction searched (m)
+  max_yaw_deg: 2.0        # largest heading correction searched (deg)
+  max_range: 20.0         # use ground points this close to the lidar (m)
+  frame_step: 1
+
 roads:
   station_step: 1.0       # cross-sections every N metres along the drive
   sample_step: 0.2        # spacing of samples across the road (m)
@@ -81,8 +88,20 @@ roads:
   lane_width: 3.5
   min_half_width: 1.5     # never end the road closer than this to the drive (m)
   smooth_m: 5.0           # smoothing of widths along the road (m)
-  dedup_dist: 3.0         # a later pass this close to an existing road is not a new road
+  dedup_dist: 6.0         # a later pass this close to an existing road, along it, is not a new road
   min_road_length: 15.0
+
+junctions:                # intersections, from drives that turn or cross
+  detect: true
+  min_turn_deg: 50        # a heading change this big ...
+  turn_window: 35.0       # ... within this many metres is a turn at a junction
+  merge_dist: 20.0        # junction candidates closer than this are one junction (m)
+  min_radius: 8.0         # roads stop this far from a junction centre, at least (m)
+  max_radius: 25.0
+  detect_side_streets: true  # also where the road edge opens up for a street nobody turned into
+  opening_m: 2.5          # ... the edge moving out by this much (m)
+  opening_min_len: 6.0    # ... over at least this length (m)
+  movements: all          # all: connect every turn between the legs; driven: only turns a drive made
 
 lanes:
   detect_paint: true      # find lane lines in the lidar intensity

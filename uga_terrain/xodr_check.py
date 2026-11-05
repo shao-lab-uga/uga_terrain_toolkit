@@ -185,7 +185,10 @@ def _arc_end_mismatch(g: dict, samples: np.ndarray) -> float:
 
 
 def read(path) -> Tuple[ET.Element, List[Road], List[Junction]]:
-    root = ET.parse(path).getroot()
+    return read_root(ET.parse(path).getroot())
+
+
+def read_root(root: ET.Element) -> Tuple[ET.Element, List[Road], List[Junction]]:
     roads = []
     for r in root.findall("road"):
         geoms = []
@@ -533,7 +536,8 @@ def check_topology(roads: List[Road], juncs: List[Junction], rep: Report) -> dic
 # --- trajectory replay --------------------------------------------------------------
 
 def read_trajectory(path) -> Dict[str, np.ndarray]:
-    """CSV with columns x, y and optionally z, yaw_deg (or heading_deg) and t."""
+    """CSV with columns x, y and optionally z, yaw_deg (or heading_deg), t and
+    recording (several drives in one file are replayed one by one)."""
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -544,93 +548,201 @@ def read_trajectory(path) -> Dict[str, np.ndarray]:
             out[k] = np.array([float(r[k]) if r[k] not in ("", None) else np.nan for r in rows])
     if "yaw_deg" not in out and "heading_deg" in out:
         out["yaw_deg"] = out["heading_deg"]
+    if "recording" in rows[0]:
+        out["recording"] = np.array([r["recording"] or "" for r in rows], dtype=object)
     return out
+
+
+def _project(r: Road, x: np.ndarray, y: np.ndarray):
+    """Nearest reference-line position of each point on one road: s, t, heading, distance."""
+    ref = reference(r)
+    n = len(x)
+    S, T, H, D = (np.full(n, np.nan) for _ in range(4))
+    if len(ref) < 2:
+        return S, T, H, np.full(n, np.inf)
+    P = np.stack([x, y], 1)
+    for a in range(0, n, 2000):
+        p = P[a:a + 2000]
+        d2 = (p[:, None, 0] - ref[None, :, 1]) ** 2 + (p[:, None, 1] - ref[None, :, 2]) ** 2
+        j = np.clip(np.argmin(d2, 1), 0, len(ref) - 2)
+        seg = ref[j + 1, 1:3] - ref[j, 1:3]
+        L2 = np.maximum((seg ** 2).sum(1), 1e-12)
+        q = np.clip(((p - ref[j, 1:3]) * seg).sum(1) / L2, 0, 1)
+        foot = ref[j, 1:3] + q[:, None] * seg
+        rel = p - foot
+        d = np.hypot(*rel.T)
+        h = ref[j, 3]
+        S[a:a + 2000] = ref[j, 0] + q * (ref[j + 1, 0] - ref[j, 0])
+        T[a:a + 2000] = np.sign(np.cos(h) * rel[:, 1] - np.sin(h) * rel[:, 0]) * d
+        H[a:a + 2000] = h
+        D[a:a + 2000] = d
+    return S, T, H, D
 
 
 def locate(roads: List[Road], x: np.ndarray, y: np.ndarray, max_dist: float = 30.0):
     """Nearest reference-line position of each point: (road index, s, t, road heading)."""
     n = len(x)
-    best_d = np.full(n, np.inf)
+    best = np.full(n, np.inf)
     ri = np.full(n, -1)
     S, T, H = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    P = np.stack([x, y], 1)
     for k, r in enumerate(roads):
-        ref = reference(r)
-        if len(ref) < 2:
-            continue
-        # nearest sample in chunks (keeps memory small), then refine on its segment
-        for a in range(0, n, 2000):
-            p = P[a:a + 2000]
-            d2 = (p[:, None, 0] - ref[None, :, 1]) ** 2 + (p[:, None, 1] - ref[None, :, 2]) ** 2
-            j = np.argmin(d2, 1)
-            j = np.clip(j, 0, len(ref) - 2)
-            seg = ref[j + 1, 1:3] - ref[j, 1:3]
-            L2 = np.maximum((seg ** 2).sum(1), 1e-12)
-            q = np.clip(((p - ref[j, 1:3]) * seg).sum(1) / L2, 0, 1)
-            foot = ref[j, 1:3] + q[:, None] * seg
-            d = np.hypot(*(p - foot).T)
-            better = d < best_d[a:a + 2000]
-            idx = np.nonzero(better)[0] + a
-            best_d[idx] = d[better]
-            ri[idx] = k
-            S[idx] = (ref[j, 0] + q * (ref[j + 1, 0] - ref[j, 0]))[better]
-            h = ref[j, 3][better]
-            H[idx] = h
-            rel = (p - foot)[better]
-            # sign: left of the line is positive
-            side = np.sign(np.cos(h) * rel[:, 1] - np.sin(h) * rel[:, 0])
-            T[idx] = side * d[better]
-    far = best_d > max_dist
-    ri[far] = -1
+        s_, t_, h_, d_ = _project(r, x, y)
+        m = d_ < best
+        best[m], ri[m], S[m], T[m], H[m] = d_[m], k, s_[m], t_[m], h_[m]
+    ri[best > max_dist] = -1
     return ri, S, T, H
 
 
-def replay(roads: List[Road], traj: Dict[str, np.ndarray], rep: Report, left_hand: bool = False) -> dict:
+def lane_graph(roads: List[Road], juncs: List[Junction]) -> set:
+    """Pairs of (road id, lane id) that the file says a vehicle can drive
+    between: lane links across road links, and junction lane links."""
+    by_id = {r.id: r for r in roads}
+    pairs = set()
+
+    def add(a, b):
+        pairs.add((a, b))
+        pairs.add((b, a))
+    for r in roads:
+        for lk, attr, sec in ((r.pred, "pred", r.sections[0] if r.sections else None),
+                              (r.succ, "succ", r.sections[-1] if r.sections else None)):
+            if lk is None or lk["type"] != "road" or sec is None or lk["id"] not in by_id:
+                continue
+            for lid, ln in sec.lanes.items():
+                other = getattr(ln, attr)
+                if lid != 0 and other is not None:
+                    add((r.id, lid), (lk["id"], other))
+    for j in juncs:
+        for c in j.connections:
+            for f, t in c["lanes"]:
+                add((c["incoming"], f), (c["connecting"], t))
+    return pairs
+
+
+def replay(roads: List[Road], traj: Dict[str, np.ndarray], rep: Report, left_hand: bool = False,
+           juncs: Sequence[Junction] = (), label: str = "") -> dict:
+    """Place a vehicle path on the map, lane by lane.
+
+    Every pose is matched to the lanes it lies in (overlapping roads inside a
+    junction give several); the path keeps its lane while it can, and moves
+    on to a lane the file links to it before any other. Moves between lanes
+    of different roads that the file does not link are counted: a vehicle
+    following the map's lane links could not make them."""
     x, y = traj["x"], traj["y"]
     n = len(x)
     if not n:
         return {"poses": 0}
-    ri, S, T, H = locate(roads, x, y)
-    lane = np.zeros(n, int)
-    ltype = np.array([""] * n, dtype=object)
-    centre_off = np.full(n, np.nan)
-    z_road = np.full(n, np.nan)
+    yaw = np.radians(traj["yaw_deg"]) if "yaw_deg" in traj else None
+    proj = [_project(r, x, y) for r in roads]
+    graph = lane_graph(roads, list(juncs))
+    choice = [None] * n          # (road index, lane id, type, centre offset, heading, s, t)
+    all_cands = [None] * n
+    prev = None
     for i in range(n):
-        if ri[i] < 0:
+        cands = []
+        for k, r in enumerate(roads):
+            S, T, H, D = proj[k]
+            if not np.isfinite(S[i]) or S[i] < -0.05 or S[i] > r.length + 0.05 or D[i] > 30:
+                continue
+            sec = r.section_at(S[i])
+            for lid, (inner, outer) in lane_bounds(r, sec, np.array([S[i]])).items():
+                lo, hi = sorted((inner[0], outer[0]))
+                if lo <= T[i] <= hi and hi - lo > 1e-3:
+                    ltype = sec.lanes[lid].type
+                    off = T[i] - 0.5 * (inner[0] + outer[0])
+                    wrong = 0.0
+                    if yaw is not None and np.isfinite(yaw[i]):
+                        along = H[i] if (lid < 0) != left_hand else H[i] + math.pi
+                        wrong = float(abs((yaw[i] - along + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2)
+                    cost = abs(off) + 10.0 * wrong + (0.0 if ltype in DRIVABLE else 5.0)
+                    cands.append((cost, k, lid, ltype, off, H[i], S[i], T[i]))
+                    break
+        all_cands[i] = cands
+        if not cands:
+            choice[i] = None
             continue
-        r = roads[ri[i]]
-        if S[i] < -0.5 or S[i] > r.length + 0.5:
-            ri[i] = -1
+        pick = None
+        if prev is not None:
+            pk = (roads[prev[0]].id, prev[1])
+            same = [c for c in cands if c[1] == prev[0] and c[2] == prev[1]]
+            linked = [c for c in cands if (pk, (roads[c[1]].id, c[2])) in graph]
+            for group in (same, linked):
+                ok = [c for c in group if c[0] < 10.0]
+                if ok:
+                    pick = min(ok)
+                    break
+        if pick is None:
+            pick = min(cands)
+        choice[i] = pick[1:]
+        prev = (pick[1], pick[2]) if pick[3] in DRIVABLE else prev
+    # inside a junction the connecting roads overlap, so the lane a pose
+    # falls in does not say which way the vehicle is going: give each pass
+    # the connecting road that joins the lane it came from to the lane it
+    # leaves by, where one exists and covers the poses
+    in_j = [c is not None and roads[c[0]].junction not in ("-1", None) for c in choice]
+    i = 0
+    while i < n:
+        if not in_j[i]:
+            i += 1
             continue
-        sec = r.section_at(S[i])
-        b = lane_bounds(r, sec, np.array([S[i]]))
-        for lid, (inner, outer) in b.items():
-            lo, hi = sorted((inner[0], outer[0]))
-            if lo <= T[i] <= hi and hi - lo > 1e-3:
-                lane[i] = lid
-                ltype[i] = sec.lanes[lid].type
-                centre_off[i] = T[i] - 0.5 * (inner[0] + outer[0])
-                break
-        zr = _eval(r.elevation, np.array([S[i]]))[0]
-        sup = _eval(r.superelevation, np.array([S[i]]))[0]
-        z_road[i] = zr + math.tan(sup) * T[i] if r.elevation else np.nan
+        e = i
+        while e < n and (in_j[e] or choice[e] is None):
+            e += 1
+        before = next((choice[k] for k in range(i - 1, -1, -1) if choice[k] is not None
+                       and choice[k][2] in DRIVABLE), None)
+        after = next((choice[k] for k in range(e, n) if choice[k] is not None and choice[k][2] in DRIVABLE), None)
+        if before is not None and after is not None:
+            a = (roads[before[0]].id, before[1])
+            b = (roads[after[0]].id, after[1])
+            for k, r in enumerate(roads):
+                if r.junction in ("-1", None):
+                    continue
+                for lid in {c[2] for cs in all_cands[i:e] if cs for c in cs if c[1] == k}:
+                    if (a, (r.id, lid)) in graph and ((r.id, lid), b) in graph:
+                        for q in range(i, e):
+                            got = [c for c in (all_cands[q] or []) if c[1] == k and c[2] == lid]
+                            if got:
+                                choice[q] = got[0][1:]
+        i = e
+    ri = np.array([c[0] if c else -1 for c in choice])
+    lane = np.array([c[1] if c else 0 for c in choice])
+    ltype = np.array([c[2] if c else "" for c in choice], dtype=object)
+    centre_off = np.array([c[3] if c else np.nan for c in choice])
+    H = np.array([c[4] if c else np.nan for c in choice])
+    z_road = np.full(n, np.nan)
+    for i, c in enumerate(choice):
+        if c is None:
+            continue
+        r = roads[c[0]]
+        if r.elevation:
+            zr = _eval(r.elevation, np.array([c[5]]))[0]
+            sup = _eval(r.superelevation, np.array([c[5]]))[0]
+            z_road[i] = zr + math.tan(sup) * c[6]
     on_road = ri >= 0
     in_drive = np.array([t in DRIVABLE for t in ltype])
     out = {"poses": int(n), "on_road_pct": 100.0 * on_road.mean(),
            "in_driving_lane_pct": 100.0 * in_drive.mean()}
+    if label:
+        out["trajectory"] = label
     if in_drive.any():
         co = np.abs(centre_off[in_drive])
         out["lane_centre_offset_median_m"] = float(np.median(co))
         out["lane_centre_offset_p95_m"] = float(np.percentile(co, 95))
-    # lane changes along the path (in driving lanes only)
-    seq = [(int(ri[i]), int(lane[i])) for i in range(n) if in_drive[i]]
-    changes = sum(1 for a, b in zip(seq, seq[1:]) if a != b and a[0] == b[0])
-    out["lane_changes"] = int(changes)
-    out["lanes_used"] = sorted({"%s:%d" % (roads[a].id, b) for a, b in seq})
-    # direction: in right-hand traffic, right lanes (negative ids) run along +s
-    if "yaw_deg" in traj and in_drive.any():
-        yaw = np.radians(traj["yaw_deg"])
-        along = np.where(lane < 0, H, H + math.pi) if not left_hand else np.where(lane > 0, H, H + math.pi)
+    seq = [(roads[int(ri[i])].id, int(lane[i])) for i in range(n) if in_drive[i]]
+    steps = [(a, b) for a, b in zip(seq, seq[1:]) if a != b]
+    changes = [st for st in steps if st[0][0] == st[1][0]]
+    road_moves = [st for st in steps if st[0][0] != st[1][0]]
+    unlinked = [st for st in road_moves if st not in graph]
+    out["lane_changes"] = len(changes)
+    out["road_changes"] = len(road_moves)
+    out["unlinked_moves"] = ["road %s lane %d -> road %s lane %d" % (a[0], a[1], b[0], b[1]) for a, b in unlinked]
+    used = []
+    for st in seq:
+        k = "%s:%d" % st
+        if k not in used:
+            used.append(k)
+    out["lanes_used"] = used
+    if yaw is not None and in_drive.any():
+        along = np.where((lane < 0) != left_hand, H, H + math.pi)
         err = np.abs((yaw - along + math.pi) % (2 * math.pi) - math.pi)[in_drive]
         out["heading_error_median_deg"] = float(np.degrees(np.median(err)))
         out["wrong_way_pct"] = 100.0 * float((err > math.radians(90)).mean())
@@ -638,23 +750,69 @@ def replay(roads: List[Road], traj: Dict[str, np.ndarray], rep: Report, left_han
         dz = (traj["z"] - z_road)[np.isfinite(z_road)]
         out["height_vs_road_median_m"] = float(np.median(dz))
         out["height_vs_road_spread_m"] = float(np.percentile(dz, 90) - np.percentile(dz, 10))
-    # findings
+    who = ("%s: " % label) if label else ""
     if out["on_road_pct"] < 99:
-        rep.add("warning", "replay_off_road", "%.0f%% of the trajectory is outside every road"
-                % (100 - out["on_road_pct"]))
+        rep.add("warning", "replay_off_road", "%s%.0f%% of the trajectory is outside every lane"
+                % (who, 100 - out["on_road_pct"]))
     if out["in_driving_lane_pct"] < 99:
-        rep.add("warning", "replay_lane", "%.0f%% of the trajectory is not inside a driving lane"
-                % (100 - out["in_driving_lane_pct"]))
+        rep.add("warning", "replay_lane", "%s%.0f%% of the trajectory is not inside a driving lane"
+                % (who, 100 - out["in_driving_lane_pct"]))
     if out.get("wrong_way_pct", 0) > 1:
-        rep.add("warning", "replay_direction", "%.0f%% of the trajectory drives against its lane's direction"
-                % out["wrong_way_pct"])
+        rep.add("warning", "replay_direction", "%s%.0f%% of the trajectory drives against its lane's direction"
+                % (who, out["wrong_way_pct"]))
     if out.get("lane_centre_offset_p95_m", 0) > 0.8:
-        rep.add("warning", "replay_centre", "the vehicle is up to %.2f m (95%%) from its lane centre"
-                % out["lane_centre_offset_p95_m"])
+        rep.add("warning", "replay_centre", "%sthe vehicle is up to %.2f m (95%%) from its lane centre"
+                % (who, out["lane_centre_offset_p95_m"]))
     if out.get("height_vs_road_spread_m", 0) > 0.15:
-        rep.add("warning", "replay_height", "the road height disagrees with the vehicle height by %.2f m "
-                "(10-90%% spread)" % out["height_vs_road_spread_m"])
+        rep.add("warning", "replay_height", "%sthe road height disagrees with the vehicle height by %.2f m "
+                "(10-90%% spread)" % (who, out["height_vs_road_spread_m"]))
+    if unlinked:
+        rep.add("warning", "replay_topology", "%sthe vehicle moves between lanes the map does not connect: %s"
+                % (who, "; ".join(out["unlinked_moves"][:5])))
     return out
+
+
+def check_lane_joins(roads: List[Road], juncs: List[Junction], rep: Report) -> None:
+    """Linked lanes must meet: the edges of a lane and of the lane it links to
+    are at the same place where the two roads join."""
+    by_id = {r.id: r for r in roads}
+
+    def edges(r: Road, s: float, lid: int):
+        sec = r.section_at(min(max(s, 0.0), r.length))
+        b = lane_bounds(r, sec, np.array([s]))
+        if lid not in b:
+            return None
+        ref = reference(r)
+        i = int(np.clip(np.searchsorted(ref[:, 0], s), 0, len(ref) - 1))
+        x0, y0, h = ref[i, 1], ref[i, 2], ref[i, 3]
+        nx, ny = -math.sin(h), math.cos(h)
+        return [(x0 + t[0] * nx, y0 + t[0] * ny) for t in b[lid]]
+    worst = {}
+    for r in roads:
+        for lk, attr, s_here in ((r.pred, "pred", 0.0), (r.succ, "succ", r.length)):
+            if lk is None or lk["type"] != "road" or lk["id"] not in by_id or not r.sections:
+                continue
+            o = by_id[lk["id"]]
+            s_there = 0.0 if lk["contact"] == "start" else o.length
+            sec = r.sections[0] if attr == "pred" else r.sections[-1]
+            for lid, ln in sec.lanes.items():
+                other = getattr(ln, attr)
+                if lid == 0 or other is None:
+                    continue
+                a, b = edges(r, s_here, lid), edges(o, s_there, other)
+                if a is None or b is None:
+                    rep.add("error", "lane_link", "lane %d links to lane %d of road %s, which is not there"
+                            % (lid, other, o.id), r.id)
+                    continue
+                # edges may be listed inner/outer in either order across the join
+                d = min(max(math.dist(a[0], b[0]), math.dist(a[1], b[1])),
+                        max(math.dist(a[0], b[1]), math.dist(a[1], b[0])))
+                key = (r.id, lid, o.id, other)
+                worst[key] = d
+    for (rid, lid, oid, other), d in worst.items():
+        if d > GAP_ERR:
+            rep.add("error", "lane_gap", "lane %d and the lane it links to (road %s lane %d) are %.2f m apart "
+                    "where the roads join" % (lid, oid, other, d), rid)
 
 
 # --- entry point --------------------------------------------------------------------
@@ -668,16 +826,29 @@ def check(xodr_path, trajectories: Sequence = (), left_hand: bool = False) -> di
         rep.add("error", "parse", "the file could not be read: %s" % e)
         return {"file": str(xodr_path), "counts": rep.counts(), "findings": rep.items}
     check_structure(root, roads, juncs, rep)
+    check_lane_joins(roads, juncs, rep)
     widths = lane_width_stats(roads, rep)
     topo = check_topology(roads, juncs, rep)
     replays = []
     for tp in trajectories:
         tr = read_trajectory(tp)
-        rr = replay(roads, tr, rep, left_hand)
-        rr["trajectory"] = Path(tp).name
-        replays.append(rr)
+        groups = [("", None)]
+        if "recording" in tr:
+            groups = [(g, tr["recording"] == g) for g in dict.fromkeys(tr["recording"])]
+        for g, m in groups:
+            part = tr if m is None else {k: v[m] for k, v in tr.items() if k != "recording"}
+            label = g or Path(tp).name
+            rr = replay(roads, part, rep, left_hand, juncs, label if len(groups) > 1 else "")
+            rr["trajectory"] = label
+            replays.append(rr)
+    by_id = {r.id: r for r in roads}
+    jlist = [{"id": j.id, "connections": [
+        {"incoming": c["incoming"], "connecting": c["connecting"],
+         "name": by_id[c["connecting"]].name if c["connecting"] in by_id else "",
+         "outgoing": (by_id[c["connecting"]].succ or {}).get("id") if c["connecting"] in by_id else None,
+         "lanes": c["lanes"]} for c in j.connections]} for j in juncs]
     return {"file": str(xodr_path), "counts": rep.counts(), "findings": rep.items,
-            "lane_widths": widths, "topology": topo, "replay": replays}
+            "lane_widths": widths, "topology": topo, "junctions": jlist, "replay": replays}
 
 
 def text_report(res: dict) -> str:
@@ -689,6 +860,8 @@ def text_report(res: dict) -> str:
         lines.append("  replay %s: %d poses, %.0f%% on a road, %.0f%% in a driving lane, %d lane changes"
                      % (r.get("trajectory", ""), r["poses"], r.get("on_road_pct", 0),
                         r.get("in_driving_lane_pct", 0), r.get("lane_changes", 0)))
+        if r.get("lanes_used"):
+            lines.append("         route: %s" % " -> ".join(r["lanes_used"]))
         if "lane_centre_offset_median_m" in r:
             lines.append("         lane-centre offset %.2f m (95%%: %.2f m)" % (
                 r["lane_centre_offset_median_m"], r["lane_centre_offset_p95_m"]))

@@ -13,7 +13,8 @@ fitted with ``paramPoly3`` pieces. Along it:
 * per side, outward: ``border`` (curb), ``border`` (verge, when there is one)
   and ``sidewalk`` lanes, each with ``height`` records for the curb height.
 
-Roads are not joined into junctions.
+Roads that meet at an intersection are joined by a junction with connecting
+roads and lane-to-lane links (see ``junctions.add_to_xodr``).
 """
 from __future__ import annotations
 
@@ -63,9 +64,9 @@ def fit_param_poly3(x: np.ndarray, y: np.ndarray, heading: np.ndarray, seg_len: 
         du = -2 * ue + k + k * math.cos(dh)
         cv = 3 * ve - k * math.sin(dh)
         dv = -2 * ve + k * math.sin(dh)
-        q = np.linspace(0, 1, 401)
-        sp = np.hypot(bu + 2 * cu * q + 3 * du * q * q, bv + 2 * cv * q + 3 * dv * q * q)
-        length = float(np.sum(0.5 * (sp[1:] + sp[:-1]) * np.diff(q)))
+        q = np.linspace(0, 1, 4001)
+        length = float(np.sum(np.hypot(np.diff(bu * q + cu * q * q + du * q ** 3),
+                                       np.diff(bv * q + cv * q * q + dv * q ** 3))))
         out.append((s_road, cx, cy, ch, length, (0.0, bu, cu, du), (0.0, bv, cv, dv)))
         s_road += length
     return out
@@ -281,7 +282,8 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
 
 
 def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cfg: dict,
-               path, name: str = "uga_terrain", road_names: Optional[dict] = None) -> dict:
+               path, name: str = "uga_terrain", road_names: Optional[dict] = None,
+               junctions: Sequence = (), ground=None) -> dict:
     xc = cfg.get("xodr") or {}
     z_off = 0.0 if xc.get("relative_elevation", True) else float(origin_lla[2])
     root = ET.Element("OpenDRIVE")
@@ -298,6 +300,17 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
     ET.SubElement(hdr, "userData", code="origin_altitude_m", value=_f(origin_lla[2]))
     for road in roads:
         road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""))
+    jinfo = {"junctions": [], "connecting_roads": 0}
+    if junctions:
+        from uga_terrain import junctions as junctions_mod
+        ends = {r.id: {"start": r.meta.get("junction_start"), "end": r.meta.get("junction_end")}
+                for r in roads}
+        jinfo = junctions_mod.add_to_xodr(root, junctions, ends, cfg,
+                                          next_id=max([r.id for r in roads] + [0]), ground=ground, z_off=z_off)
+    # OpenDRIVE wants junctions after all roads
+    for je in root.findall("junction"):
+        root.remove(je)
+        root.append(je)
     ET.indent(root, space="  ")
     xml = ET.tostring(root, encoding="unicode")
     xml = xml.replace("<geoReference>+proj", "<geoReference><![CDATA[+proj").replace(
@@ -305,4 +318,5 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
     with open(path, "w", encoding="utf-8") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         f.write(xml + "\n")
-    return {"roads": len(roads), "length_m": float(sum(r.length for r in roads))}
+    return {"roads": len(roads), "length_m": float(sum(r.length for r in roads)),
+            "junctions": jinfo["junctions"], "connecting_roads": jinfo["connecting_roads"]}
