@@ -34,6 +34,7 @@ Your browser opens at http://127.0.0.1:8090. If an older copy of the app is stil
 3. Press **Build map**. Progress shows at the top, and **Stop** cancels.
 4. Look at the results:
    - **Map**: shaded relief (height colours with hill shading), surface type, elevation, slope, roughness and intensity. Hover over a spot for its values, or click a road.
+     **Aerial photo (USGS)** in the Layer menu downloads a free public-domain aerial photo of the map area from the USGS National Map, placed by the map's GPS position (US only; needs internet the first time, then it is kept with the map). The source can be changed under `imagery:` in the config.
    - **3D**: the cleaned ground as a lit, shadowed relief model, coloured by height or by surface type (or as points). Heights can be exaggerated so gentle slopes show.
    - **Road profile**: grade, banking, widths, curb heights and roughness along each road.
    - **Accuracy**: press **Check accuracy** to see how far the map can be trusted (see below), and look at the raw lidar points across any road, coloured by scan.

@@ -227,7 +227,7 @@ $("import-file").addEventListener("change", guard(async (e) => {
 }));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
-  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null;
+  S.previews = {}; S.images = {}; S.sat = null; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null;
   if (S.three) { S.three.dispose(); S.three = null; }
   if (S.summary) {
     S.previews = await api(`/api/maps/${S.map}/previews`);
@@ -350,6 +350,30 @@ function getImage(name) {
   S.images[name] = img;
   return img;
 }
+// aerial photo: downloaded by the server for the map's GPS position the first time it is picked
+async function fetchSatellite() {
+  if (S.sat && S.sat.map === S.map) return;          // already downloading, or failed (pick the layer again to retry)
+  const map = S.map;
+  S.sat = { map, busy: true };
+  satNote("satellite");
+  try {
+    const d = await api(`/api/maps/${map}/satellite`, { method: "POST" });
+    if (S.map !== map) return;
+    S.previews.satellite = d; delete S.images.satellite; S.sat = null;
+  } catch (e) {
+    if (S.map !== map) return;
+    S.sat = { map, error: e.message };
+  }
+  drawMap();
+}
+function satNote(layer) {
+  const n = $("map-note");
+  const s = layer === "satellite" && S.sat && S.sat.map === S.map ? S.sat : null;
+  n.hidden = !s;
+  if (!s) return;
+  n.classList.toggle("err", !!s.error);
+  n.textContent = s.error ? `No aerial photo: ${s.error}` : "Downloading the aerial photo for this map…";
+}
 function fitView() {
   const p = Object.values(S.previews)[0];
   if (!p) return;
@@ -382,16 +406,19 @@ function drawMap() {
   cv.width = w * devicePixelRatio; cv.height = h * devicePixelRatio;
   ctx.clearRect(0, 0, cv.width, cv.height);
   const layer = $("layer").value;
-  const p = S.previews[layer] || S.previews.elevation;
+  if (layer === "satellite" && !S.previews.satellite && Object.keys(S.previews).length) fetchSatellite();
+  satNote(layer);
+  const shown = layer in S.previews ? layer : (layer === "satellite" && S.previews.relief ? "relief" : "elevation");
+  const p = S.previews[shown];
   $("map-empty").hidden = !!p;
   if (!p) return;
   if (!S.view) fitView();
-  const img = getImage(layer in S.previews ? layer : "elevation");
+  const img = getImage(shown);
   if (img.complete && img.naturalWidth) {
     const [x0, y0, x1, y1] = p.extent;
     const [a, b] = toPx(x0, y1);
     const k = S.view.s * devicePixelRatio;
-    ctx.imageSmoothingEnabled = layer === "relief" || S.view.s * (x1 - x0) / p.width < 2;
+    ctx.imageSmoothingEnabled = shown === "relief" || shown === "satellite" || S.view.s * (x1 - x0) / p.width < 2;
     ctx.imageSmoothingQuality = "high";
     ctx.save();
     ctx.translate(a, b);
@@ -441,7 +468,7 @@ function drawMap() {
   }
   scaleBar();
   northArrow();
-  mapLegend(p, layer);
+  mapLegend(p, shown);
 }
 // lanes from the exported .xodr: filled strips, edges, and the centre line
 function drawLanes() {
@@ -563,6 +590,14 @@ function mapLegend(p, layer) {
   const box = $("map-legend");
   const ramp = LAYER_MAP[layer];
   if (!p || !$("show-legend").checked) { box.hidden = true; return; }
+  if (layer === "satellite") {
+    box.innerHTML = "";
+    box.append(el("div", { class: "t" }, p.label || "Aerial photo"));
+    box.append(el("div", { class: "note" }, "Placed by GPS, so it can be off by a metre or so. " + (p.credit || "")));
+    lanesLegend(box);
+    box.hidden = false;
+    return;
+  }
   if (!ramp) {          // surface classes
     box.innerHTML = "";
     box.append(el("div", { class: "t" }, "Surface"));
@@ -658,6 +693,7 @@ function pickRoad(px, py) {
   }
   if (best !== null) { S.road = best; $("road-select").value = best; drawMap(); drawProfile(); toast(`${roadName(best)} selected; see the Road profile tab.`); }
 }
+$("layer").addEventListener("change", () => { if (S.sat && S.sat.error) S.sat = null; });
 ["layer", "show-lanes", "show-roads", "show-drives", "show-legend"].forEach((id) => $(id).addEventListener("change", drawMap));
 $("btn-fit").addEventListener("click", () => { S.view = null; drawMap(); });
 window.addEventListener("resize", () => { drawMap(); drawProfile(); if (S.three) S.three.resize(); });

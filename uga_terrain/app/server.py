@@ -19,7 +19,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from uga_terrain import __version__, config as config_mod, mcap_io, pipeline, poses
+from uga_terrain import __version__, config as config_mod, imagery, mcap_io, pipeline, poses
 from uga_terrain.app import archive
 from uga_terrain.app.jobs import JobManager
 from uga_terrain.grid import LABELS, TerrainGrid
@@ -332,7 +332,25 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
             from uga_terrain import export
             d = export.previews(grid_of(p), p.out / "previews")
             export.save_json(d, f)
+        sat = imagery.load(p.out / "previews", p.meta.get("origin"))
+        if sat:
+            d["satellite"] = sat
         return d
+
+    @app.post("/api/maps/{slug}/satellite")
+    def fetch_satellite(slug: str):
+        p = project(slug)
+        f = p.out / "previews" / "previews.json"
+        if not f.is_file():
+            raise HTTPException(400, "build the map first")
+        d = json.loads(f.read_text())
+        ext = next((v["extent"] for v in d.values() if isinstance(v, dict) and "extent" in v), None)
+        if ext is None:
+            raise HTTPException(400, "build the map first")
+        try:
+            return imagery.fetch(p.out / "previews", ext, p.meta.get("origin"), cfg())
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
 
     @app.get("/api/maps/{slug}/preview/{name}")
     def preview_png(slug: str, name: str):

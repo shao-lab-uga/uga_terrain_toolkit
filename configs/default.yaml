@@ -112,3 +112,11 @@ xodr:
   segment_len: 20.0       # length of each reference-line curve piece (m)
   profile_step: 5.0       # spacing of elevation / superelevation / width records (m)
   relative_elevation: true   # elevations relative to the map origin (CARLA friendly)
+
+imagery:                  # aerial photo layer of the 2D map (needs internet; downloaded once per map)
+  url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export?bbox={west},{south},{east},{north}&bboxSR=4326&imageSR=4326&size={width},{height}&format=jpg&f=image"
+  label: Aerial photo (USGS)
+  credit: "Imagery: USGS The National Map (public domain)"
+  m_per_px: 0.25          # photo detail asked for (m per pixel)
+  max_px: 4096            # largest photo side (pixels)
+  timeout: 30.0           # seconds

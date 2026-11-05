@@ -63,6 +63,10 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .readout { position: absolute; left: 8px; bottom: 8px; background: color-mix(in srgb, var(--panel) 88%, transparent);
   padding: 6px 9px; border-radius: 6px; font-size: 12px; pointer-events: none; white-space: pre; }
 .empty { position: absolute; inset: 0; pointer-events: none; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.map-note { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); max-width: 70%; pointer-events: none;
+  background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 12px; font-size: 13px; }
+.map-note.err { border-color: #c0392b; color: #c0392b; }
 .legend-box { position: absolute; right: 10px; top: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; pointer-events: none; min-width: 120px; }
 .legend-box .t { font-weight: 600; margin-bottom: 6px; }
