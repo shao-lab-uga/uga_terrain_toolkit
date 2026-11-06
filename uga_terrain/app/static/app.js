@@ -242,6 +242,7 @@ async function loadResults() {
   S.view = null;
   S.acc = null; S.section = null;
   fillRoadSelect();
+  markCopy();
   if ($("tab-accuracy").classList.contains("active")) await loadAccuracy();
   await loadFiles();
   drawMap();
@@ -806,6 +807,37 @@ async function saveEdits() {
   drawMap(); editorPanel();
   const c = res.check;
   toast(`Saved. The .xodr was rewritten; OpenDRIVE check: ${c.error} error(s), ${c.warning} warning(s).`, c.error > 0);
+}
+function markCopy() {
+  const box = $("mark-copy");
+  box.innerHTML = "";
+  if (!S.ed || !(S.junctions || []).length) return;
+  const others = (S.maps || []).filter((m) => m.slug !== S.map);
+  if (!others.length) return;
+  const srcs = S.ed.marking_sources || [];
+  const s = el("select", {});
+  for (const m of others) s.append(el("option", { value: m.slug }, m.name || m.slug));
+  box.append(el("span", {}, "Crosswalks from "), s, " ",
+    el("button", { class: "small", onclick: guard(async () => {
+      const res = await api(`/api/maps/${S.map}/markings/import`, { method: "POST", body: { from: s.value } });
+      await reloadMarkings();
+      const mt = res.match || {};
+      toast(`Copied ${res.added} of ${res.offered} stop lines and crosswalks from ${res.from}` +
+        (mt.used ? ` (lined up on the paint, moved ${Math.hypot(mt.dx, mt.dy).toFixed(1)} m).` : " (placed by GPS only).") +
+        ` OpenDRIVE check: ${res.check.error} error(s).`, res.check.error > 0);
+    }) }, "Copy"));
+  for (const n of srcs) box.append(" ", el("span", { class: "chip" }, `from ${n} `,
+    el("a", { href: "#", title: "Take the copied ones off this map", onclick: guard(async (e) => {
+      e.preventDefault();
+      await api(`/api/maps/${S.map}/markings/import/${encodeURIComponent(n)}`, { method: "DELETE" });
+      await reloadMarkings(); toast(`Removed the markings copied from ${n}.`);
+    }) }, "\u00d7")));
+}
+async function reloadMarkings() {
+  S.ed = await api(`/api/maps/${S.map}/edits`);
+  S.lanes = await api(`/api/maps/${S.map}/lanes`);
+  S.acc = null;
+  drawMap(); markCopy();
 }
 function pickRoad(px, py) {
   const [x, y] = toW(px, py);

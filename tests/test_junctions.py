@@ -191,3 +191,44 @@ def test_markings_become_road_objects(tmp_path):
     assert [v["type"] for v in m] == ["crosswalk", "roadMark"]
     P = np.array(m[0]["polygon"])
     assert abs(P[:, 0].min() - 12) < 0.05 and abs(P[:, 1].max() - 3.5) < 0.05
+
+
+def _ladder_points(shift=(0.0, 0.0), seed=0):
+    """Ground points of a road with one diagonal ladder crosswalk (two side
+    lines 3 m apart, 12 m long, bars between) and a stop line beside it."""
+    import math
+    rng = np.random.default_rng(seed)
+    P = rng.uniform(-20, 20, (60000, 2))
+    it = rng.normal(1.0, 0.1, len(P))
+    a = math.radians(35.0)
+    d = np.array([math.cos(a), math.sin(a)])
+    n = np.array([-d[1], d[0]])
+    s, t = P @ d, P @ n
+    along = np.abs(s) < 6.0
+    side = along & ((np.abs(t) < 0.1) | (np.abs(t - 3.0) < 0.1))
+    bars = along & (t > 0) & (t < 3.0) & (np.mod(s, 1.2) < 0.5)
+    stop = (np.abs(s) < 3.0) & (np.abs(t - 6.0) < 0.15)
+    it[side | bars | stop] = 4.0
+    P = P + np.asarray(shift)
+    return np.c_[P, np.zeros(len(P)), it]
+
+
+def test_crosswalk_found_from_the_paint_at_any_angle():
+    from uga_terrain import markings
+    found = markings.find_painted(_ladder_points(), (0.0, 0.0), 20.0)
+    cw = [m for m in found if m["kind"] == "crosswalk"]
+    st = [m for m in found if m["kind"] == "stop_line"]
+    assert len(cw) == 1 and len(st) == 1
+    assert abs(cw[0]["depth"] - 3.0) < 0.3 and abs(cw[0]["width"] - 12.0) < 1.0
+    c = np.mean(cw[0]["polygon"], 0)
+    assert np.hypot(*(c - 1.5 * np.array([-np.sin(np.radians(35)), np.cos(np.radians(35))]))) < 0.5
+
+
+def test_markings_from_another_map_are_lined_up_on_the_paint():
+    from uga_terrain import markings
+    A = _ladder_points()
+    B = _ladder_points(shift=(0.6, -0.4), seed=1)       # the other drive, GPS off by 0.7 m
+    poly = [[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]]
+    res = markings.snap([poly], A, B)
+    assert res["used"]
+    assert abs(res["dx"] + 0.6) < 0.15 and abs(res["dy"] - 0.4) < 0.15

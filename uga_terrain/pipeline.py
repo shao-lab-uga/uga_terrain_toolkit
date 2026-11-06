@@ -590,13 +590,100 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
                 progress.note("Road %d: looking for stop lines and crosswalks failed (%s)." % (r.id, e))
                 continue
             r.meta["markings"] = ms
+        for jn in juncs:
+            progress.set("find lanes", len(found), len(found), "junction %d: crosswalks in the paint" % jn.id)
+            try:
+                A = markings._ground_points(project, (jn.x, jn.y), PAINT_RADIUS, cfg)
+                markings.merge_found(found, juncs, markings.find_painted(A, (jn.x, jn.y), PAINT_RADIUS))
+            except Exception as e:
+                progress.note("Junction %d: looking for crosswalks in the paint failed (%s)." % (jn.id, e))
+        _copy_markings(project, found, juncs, cfg, progress)
+        for r in found:
+            ms = r.meta.get("markings") or []
             if ms:
                 progress.note("Road %d: %s at the junction." % (r.id, ", ".join(
-                    "%s %.1f m deep" % (m["kind"].replace("_", " "), m["depth"]) for m in ms)))
+                    "%s%s" % (m["kind"].replace("_", " "),
+                              " (copied from %s)" % m["copied_from"] if m.get("copied_from") else "")
+                    for m in ms)))
     gdir = project.root / "grid"
     grid.save(gdir)
     export.save_json(export.road_json(found), project.root / "roads.json")
     return grid, found
+
+
+PAINT_RADIUS = 40.0     # m around a junction searched for crosswalk paint
+
+
+def marking_sources(project: Project) -> List[str]:
+    return list(project.meta.get("marking_sources") or [])
+
+
+def _copy_markings(project: Project, roads, juncs, cfg: dict, progress=None, names=None) -> List[dict]:
+    """Bring in the stop lines and crosswalks of the maps listed in
+    meta["marking_sources"] (other maps of the same place) that this map does
+    not have itself. Returns one result per source map."""
+    from uga_terrain import markings
+    out = []
+    for name in (marking_sources(project) if names is None else names):
+        rec = {"from": name, "added": 0}
+        try:
+            src = Project.open(cfg, name)
+            res = markings.transfer(src, project, cfg)
+            rec["added"] = markings.attach(roads, juncs, res["markings"])
+            rec["offered"] = len(res["markings"])
+            rec["match"] = res["match"]
+            if progress is not None:
+                mt = res["match"] or {}
+                progress.note("From map %s: %d of %d stop lines and crosswalks added (%s)." % (
+                    name, rec["added"], rec["offered"],
+                    "paint of the two maps matched %.2f, moved %.2f m" % (
+                        mt["score"], math.hypot(mt["dx"], mt["dy"])) if mt.get("used")
+                    else "placed by GPS only: %s" % mt.get("why_not", "no lidar match")))
+        except Exception as e:
+            rec["error"] = str(e)
+            if progress is not None:
+                progress.note("Copying markings from map %s failed (%s)." % (name, e))
+        out.append(rec)
+    return out
+
+
+def import_markings(project: Project, cfg: dict, source: str) -> dict:
+    """Copy markings from map ``source`` now (no rebuild) and remember it, so
+    later rebuilds copy them again. Rewrites the OpenDRIVE file and its check."""
+    if source == project.name:
+        raise ValueError("pick another map")
+    Project.open(cfg, source)                       # exists?
+    roads = load_roads(project)
+    juncs = load_junctions(project)
+    if not juncs:
+        raise ValueError("this map has no junction to put crosswalks at")
+    for r in roads:                                 # a fresh copy replaces an earlier one
+        if r.meta.get("markings"):
+            r.meta["markings"] = [m for m in r.meta["markings"] if m.get("copied_from") != source]
+    rec = _copy_markings(project, roads, juncs, cfg, names=[source])[0]
+    if rec.get("error"):
+        raise RuntimeError(rec["error"])
+    project.meta["marking_sources"] = [s_ for s_ in marking_sources(project) if s_ != source] + [source]
+    project.save()
+    export.save_json(export.road_json(roads), project.root / "roads.json")
+    apply_edits(project, cfg)
+    return rec
+
+
+def remove_marking_source(project: Project, cfg: dict, source: str) -> int:
+    roads = load_roads(project)
+    n = 0
+    for r in roads:
+        ms = r.meta.get("markings") or []
+        keep = [m for m in ms if m.get("copied_from") != source]
+        n += len(ms) - len(keep)
+        if ms:
+            r.meta["markings"] = keep
+    project.meta["marking_sources"] = [s_ for s_ in marking_sources(project) if s_ != source]
+    project.save()
+    export.save_json(export.road_json(roads), project.root / "roads.json")
+    apply_edits(project, cfg)
+    return n
 
 
 def _driven_movements(juncs, found, passes) -> None:

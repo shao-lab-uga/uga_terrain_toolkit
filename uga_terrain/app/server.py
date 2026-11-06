@@ -356,7 +356,8 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
                  for d in json.loads((p.root / "roads.json").read_text())] if (p.root / "roads.json").is_file() else []
         return {"edits": p.edits(), "roads": roads, "road_types": list(xodr_mod.ROAD_TYPES),
                 "lane_types": list(xodr_mod.LANE_TYPES),
-                "defaults": xodr_mod.road_details(c, None, -1)}
+                "defaults": xodr_mod.road_details(c, None, -1),
+                "marking_sources": pipeline.marking_sources(p)}
 
     @app.put("/api/maps/{slug}/edits")
     def put_edits(slug: str, body: dict = Body(...)):
@@ -371,6 +372,29 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         except Exception as e:  # keep the app up; say what went wrong
             raise HTTPException(500, "the .xodr could not be rewritten: %s" % e)
         return dict(res, edits=p.edits())
+
+    @app.post("/api/maps/{slug}/markings/import")
+    def import_markings(slug: str, body: dict = Body(...)):
+        p = project(slug)
+        if jobs.busy():
+            raise HTTPException(409, "wait for the running job to finish")
+        if not (p.root / "roads.json").is_file():
+            raise HTTPException(400, "build the map first")
+        src = project(str(body.get("from") or ""))
+        try:
+            rec = pipeline.import_markings(p, cfg(), src.name)
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e))
+        chk = json.loads((p.out / "xodr_check.json").read_text())
+        return dict(rec, check=chk.get("counts", {}))
+
+    @app.delete("/api/maps/{slug}/markings/import/{src}")
+    def remove_markings(slug: str, src: str):
+        p = project(slug)
+        if jobs.busy():
+            raise HTTPException(409, "wait for the running job to finish")
+        name = next((n for n in pipeline.marking_sources(p) if pipeline._slug(n) == src or n == src), src)
+        return {"removed": pipeline.remove_marking_source(p, cfg(), name)}
 
     @app.get("/api/maps/{slug}/junctions")
     def junctions(slug: str):
