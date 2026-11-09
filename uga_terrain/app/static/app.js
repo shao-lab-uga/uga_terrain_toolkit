@@ -647,11 +647,18 @@ function mapLegend(p, layer) {
   else legendBox(box, { title: "Lidar intensity", ramp, lo: p.min, hi: p.max, unit: "", digits: 0 });
   lanesLegend(box);
 }
+function signalsWhyNot() {
+  const scan = "Rebuild this map once with Re-run from: Scan (it needs the lidar above the ground).";
+  if (!S.signals || !S.signals.length) return "Signal poles: none yet. " + scan;
+  const sp = S.signals[0];
+  if (!sp.version) return "Signal poles: searched by an older version. Re-run from: Export files.";
+  if (!sp.above_ground_points || sp.above_ground_points < 100) return "Signal poles: this map has no lidar above the ground. " + scan;
+  return `No signal poles found (v${sp.version}: ${sp.why_not || "no match"}; ${sp.above_ground_points.toLocaleString()} points above the ground, ${sp.wire_points ?? "?"} wire points).`;
+}
 function signalsLegend(box) {
   if (!(S.signals || []).some((sp) => (sp.poles || []).length)) {
     if ((S.junctions || []).length) box.append(el("div", { class: "note", style: "color: #b35f00" },
-      (S.signals && S.signals.length) ? "No signal poles were found at this junction."
-        : "Signal poles: none yet. Rebuild this map once with Re-run from: Scan (it needs the lidar above the ground)."));
+      signalsWhyNot()));
     return;
   }
   const row = (style, text) => box.append(el("div", { class: "st" }, el("span", { class: "sw", style }), el("span", { class: "v" }, text)));

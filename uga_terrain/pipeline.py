@@ -1004,6 +1004,8 @@ def find_signals(project: Project, cfg: dict, juncs=None, progress=None) -> List
                     progress.note("Junction %d: looking for signal poles failed (%s)." % (jn.id, e))
                 continue
             res["junction"] = jn.id
+            from uga_terrain import __version__
+            res["version"] = __version__
             out.append(res)
             if progress is not None:
                 progress.note("Junction %d: %d signal poles (%s), %d span wires, %d signal heads." % (

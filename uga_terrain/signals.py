@@ -164,7 +164,8 @@ def detect(lidar: np.ndarray, centre, radius: float = 40.0) -> dict:
     O = L[L["ground"] == 0]                 # every scan counts: sparse scans see a wire once
     P = np.c_[O["x"], O["y"], O["z"]]
     if len(G) < 100 or len(P) < 100:
-        return {"wires": [], "poles": [], "heads": []}
+        return {"wires": [], "poles": [], "heads": [], "above_ground_points": int(len(P)),
+                "why_not": "no lidar above the ground here"}
     h = P[:, 2] - ground_height(G, P[:, 0], P[:, 1])
     X = thin_points(P, h)
     X = X[np.hypot(X[:, 0] - centre[0], X[:, 1] - centre[1]) < radius]
@@ -234,7 +235,11 @@ def detect(lidar: np.ndarray, centre, radius: float = 40.0) -> dict:
     for i, hd in enumerate(heads):
         hd["id"] = i
         hd["ground_z"] = round(float(ground_height(G, np.array([hd["x"]]), np.array([hd["y"]]))[0]), 2)
-    return {"wires": wires, "poles": poles, "heads": heads}
+    out = {"wires": wires, "poles": poles, "heads": heads, "above_ground_points": int(len(P)),
+           "wire_points": int(len(X)), "wire_runs": len(W)}
+    if not poles:
+        out["why_not"] = ("no wires found 4-9 m up" if not W else "wires found, but no pole where they end")
+    return out
 
 
 def _on_edge(w, a, b) -> bool:
