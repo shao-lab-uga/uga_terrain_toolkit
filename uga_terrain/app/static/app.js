@@ -648,7 +648,12 @@ function mapLegend(p, layer) {
   lanesLegend(box);
 }
 function signalsLegend(box) {
-  if (!(S.signals || []).some((sp) => (sp.poles || []).length)) return;
+  if (!(S.signals || []).some((sp) => (sp.poles || []).length)) {
+    if ((S.junctions || []).length) box.append(el("div", { class: "note", style: "color: #b35f00" },
+      (S.signals && S.signals.length) ? "No signal poles were found at this junction."
+        : "Signal poles: none yet. Rebuild this map once with Re-run from: Scan (it needs the lidar above the ground)."));
+    return;
+  }
   const row = (style, text) => box.append(el("div", { class: "st" }, el("span", { class: "sw", style }), el("span", { class: "v" }, text)));
   row("background: #111; border-radius: 50%; border: 1px solid #fff", "signal pole (from lidar)");
   row("background: transparent; border-top: 2px solid rgb(120,40,160); height: 0; margin-top: 7px", "span wire (dashed: not seen)");
