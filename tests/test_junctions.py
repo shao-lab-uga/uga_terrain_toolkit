@@ -232,3 +232,52 @@ def test_markings_from_another_map_are_lined_up_on_the_paint():
     res = markings.snap([poly], A, B)
     assert res["used"]
     assert abs(res["dx"] + 0.6) < 0.15 and abs(res["dy"] - 0.4) < 0.15
+
+
+def _span_cloud():
+    """Synthetic lidar of a junction: flat ground, 4 corner poles 8 m tall,
+    span wires between them at 6.5 m and two signal heads on one wire."""
+    from uga_terrain import lidar_map
+    rng = np.random.default_rng(3)
+    g = np.mgrid[-40:40:0.25, -40:40:0.25].reshape(2, -1).T
+    pts = [np.c_[g, np.zeros(len(g))]]
+    gnd = [np.ones(len(g), bool)]
+    poles = np.array([[-14.0, 12.0], [13.0, 14.0], [15.0, -12.0], [-12.0, -15.0]])
+    for p in poles:
+        z = np.arange(0.1, 8.0, 0.05)
+        a = rng.uniform(0, 2 * np.pi, len(z))
+        pts.append(np.c_[p[0] + 0.15 * np.cos(a), p[1] + 0.15 * np.sin(a), z])
+        gnd.append(np.zeros(len(z), bool))
+    for i in range(4):
+        a, b = poles[i], poles[(i + 1) % 4]
+        f = np.arange(0, 1, 0.1 / np.hypot(*(b - a)))
+        xy = a + (b - a) * f[:, None] + rng.normal(0, 0.03, (len(f), 2))
+        pts.append(np.c_[xy, 6.5 + rng.normal(0, 0.03, len(f))])
+        gnd.append(np.zeros(len(f), bool))
+    a, b = poles[0], poles[1]
+    for f in (0.4, 0.6):
+        c = a + (b - a) * f
+        box = np.mgrid[-0.2:0.2:0.05, -0.15:0.15:0.05, 5.1:6.2:0.05].reshape(3, -1).T
+        pts.append(np.c_[c + box[:, :2], box[:, 2]])
+        gnd.append(np.zeros(len(box), bool))
+    P = np.vstack(pts)
+    out = np.zeros(len(P), lidar_map.DTYPE)
+    out["x"], out["y"], out["z"] = P.T
+    out["intensity"] = 10
+    out["ground"] = np.concatenate(gnd)
+    out["hits"] = 10
+    return out, poles
+
+
+def test_signal_span_poles_wires_and_heads_found():
+    from uga_terrain import signals
+    cloud, poles = _span_cloud()
+    res = signals.detect(cloud, (0.0, 0.0))
+    assert len(res["poles"]) == 4
+    for p in poles:
+        d = min(np.hypot(q["x"] - p[0], q["y"] - p[1]) for q in res["poles"])
+        assert d < 0.5
+    assert all(7.0 < q["height"] < 8.5 for q in res["poles"])
+    assert len(res["wires"]) == 4 and sum(w["seen_m"] > 0 for w in res["wires"]) >= 3
+    assert len(res["heads"]) == 2
+    assert all(abs(h["bottom"] - 5.1) < 0.3 and abs(h["top"] - 6.2) < 0.3 for h in res["heads"])

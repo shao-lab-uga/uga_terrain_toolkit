@@ -123,3 +123,6 @@ xodr:
     speed: 25             # speed limit; leave empty to write none
     unit: mph             # mph or km/h
     one_way: "no"         # no, forward (along the road), backward
+
+signals:
+  detect: true          # signal span (wires, corner poles, traffic lights) from the lidar at each junction

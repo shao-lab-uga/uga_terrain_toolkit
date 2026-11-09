@@ -227,13 +227,14 @@ $("import-file").addEventListener("change", guard(async (e) => {
 }));
 async function loadResults() {
   S.summary = S.status && S.status.summary;
-  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.lanes = null; S.road = null; S.ed = null; S.edits = null; S.pick = null;
+  S.previews = {}; S.images = {}; S.roads = []; S.drives = []; S.junctions = []; S.signals = []; S.lanes = null; S.road = null; S.ed = null; S.edits = null; S.pick = null;
   if (S.three) { S.three.dispose(); S.three = null; }
   if (S.summary) {
     S.previews = await api(`/api/maps/${S.map}/previews`);
     S.roads = await api(`/api/maps/${S.map}/roads`);
     S.drives = await api(`/api/maps/${S.map}/drives`);
     S.junctions = (await api(`/api/maps/${S.map}/junctions`)) || [];
+    S.signals = (await api(`/api/maps/${S.map}/signals`)) || [];
     S.lanes = await api(`/api/maps/${S.map}/lanes`);
     S.ed = await api(`/api/maps/${S.map}/edits`);
     S.edits = JSON.parse(JSON.stringify(S.ed.edits)); S.dirty = false; S.pick = null;
@@ -513,6 +514,32 @@ function drawLanes() {
       ctx.strokeStyle = "rgba(60,60,60,.9)"; ctx.lineWidth = 1 * dpr; ctx.stroke();
     }
   }
+  drawSignals();
+}
+// signal span from the lidar: wires (purple, dashed where not seen), poles (black dots), heads (amber)
+function drawSignals() {
+  const dpr = devicePixelRatio;
+  for (const sp of S.signals || []) {
+    for (const w of sp.wires || []) {
+      const [a, b] = [toPx(...w.a), toPx(...w.b)];
+      ctx.setLineDash(w.seen_m > 0 ? [] : [6 * dpr, 5 * dpr]);
+      ctx.strokeStyle = "rgba(120,40,160,.9)"; ctx.lineWidth = 2 * dpr;
+      ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    for (const h of sp.heads || []) {
+      const [x, y] = toPx(h.x, h.y), r = Math.max(4 * dpr, 0.4 * S.view.s * dpr);
+      ctx.fillStyle = "#f4b400"; ctx.strokeStyle = "#222"; ctx.lineWidth = 1.5 * dpr;
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r); ctx.strokeRect(x - r, y - r, 2 * r, 2 * r);
+    }
+    for (const q of sp.poles || []) {
+      const [x, y] = toPx(q.x, q.y), r = Math.max(5 * dpr, q.radius * S.view.s * dpr);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.fillStyle = "#111"; ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5 * dpr; ctx.stroke();
+      ctx.font = `${11 * dpr}px system-ui, sans-serif`; ctx.fillStyle = "#111";
+      ctx.fillText(`pole ${q.height.toFixed(1)} m`, x + r + 3 * dpr, y - r);
+    }
+  }
 }
 function northArrow() {
   const d = devicePixelRatio, R = 26 * d, r = 12 * d, x = 38 * d, y = 38 * d;
@@ -630,6 +657,11 @@ function lanesLegend(box) {
   if ((S.lanes.markings || []).length) {
     row("background: repeating-linear-gradient(90deg, #fff 0 3px, #bbb 3px 6px); border: 1px solid #555", "crosswalk");
     row("background: #fff; border: 1px solid #555; height: 4px; margin-top: 5px", "stop line");
+  }
+  if ((S.signals || []).some((sp) => (sp.poles || []).length)) {
+    row("background: #111; border-radius: 50%; border: 1px solid #fff", "signal pole (lidar)");
+    row("background: transparent; border-top: 2px solid rgb(120,40,160); height: 0; margin-top: 7px", "span wire");
+    row("background: #f4b400; border: 1px solid #222", "traffic light");
   }
   row("background: #b5121b; height: 3px; margin-top: 6px", "driven path of the selected road");
 }
@@ -1410,6 +1442,42 @@ async function open3D() {
   const lidarOnInput = () => { lidarUpdate(); };
   lidIds.forEach((id) => $(id).addEventListener("input", lidarOnInput));
 
+  // --- signal span: poles, wires and heads, at true height above the ground -----------
+  const sigGroup = new THREE.Group();
+  scene.add(sigGroup);
+  const sigMats = [new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5, metalness: 0.6 }),
+    new THREE.LineBasicMaterial({ color: 0x7a28a0 }), new THREE.MeshStandardMaterial({ color: 0xf4b400, roughness: 0.6 })];
+  const sigUpdate = () => {
+    sigGroup.children.slice().forEach((c) => { sigGroup.remove(c); c.geometry.dispose(); });
+    const ex = Number($("three-exag").value);
+    const base = (x, y, gz) => { const g = groundAt(x, y); return ((Number.isFinite(g) ? g : gz) - zmid) * ex; };
+    for (const sp of S.signals || []) {
+      const top = {};
+      for (const q of sp.poles || []) {
+        const b = base(q.x, q.y, q.ground_z);
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(q.radius, q.radius, q.height, 12), sigMats[0]);
+        m.rotation.x = Math.PI / 2; m.position.set(q.x - cx, q.y - cy, b + q.height / 2); m.castShadow = true;
+        sigGroup.add(m); top[q.id] = b;
+      }
+      for (const w of sp.wires || []) {
+        const [p, q] = w.poles.map((i) => (sp.poles || []).find((o) => o.id === i));
+        if (!p || !q) continue;
+        const hgt = w.height || 6.5;
+        const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p.x - cx, p.y - cy, top[p.id] + hgt), new THREE.Vector3(q.x - cx, q.y - cy, top[q.id] + hgt)]);
+        sigGroup.add(new THREE.Line(g, sigMats[1]));
+      }
+      for (const h of sp.heads || []) {
+        const b = base(h.x, h.y, h.ground_z), H_ = h.top - h.bottom;
+        const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(h.width, 0.3), 0.35, H_), sigMats[2]);
+        m.rotation.z = Math.atan2(h.wire_dir[1], h.wire_dir[0]);
+        m.position.set(h.x - cx, h.y - cy, b + h.bottom + H_ / 2); m.castShadow = true;
+        sigGroup.add(m);
+      }
+    }
+  };
+  sigUpdate();
+  $("three-exag").addEventListener("input", sigUpdate);
+
   update();
   lidarUpdate();
   const ids = ["three-color", "three-exag", "three-size", "three-style"];
@@ -1427,6 +1495,8 @@ async function open3D() {
     alive = false;
     ids.forEach((id) => $(id).removeEventListener("input", update));
     lidIds.forEach((id) => $(id).removeEventListener("input", lidarOnInput));
+    $("three-exag").removeEventListener("input", sigUpdate);
+    sigGroup.children.forEach((c) => c.geometry.dispose()); sigMats.forEach((m_) => m_.dispose());
     if (lid) lid.geom.dispose();
     lidMat.dispose();
     $("three-legend").hidden = true;

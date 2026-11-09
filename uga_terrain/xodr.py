@@ -332,6 +332,7 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
     sec.remove(centre)
     sec.insert(1, centre)
     add_markings(r, road, geoms)
+    add_signal_structures(r, road, geoms)
     return r
 
 
@@ -374,6 +375,57 @@ def add_markings(r, road: Road, geoms) -> int:
         for a, b in uv:
             ET.SubElement(ol, "cornerLocal", u=_f(a), v=_f(b), z="0", height="0")
     return len(marks)
+
+
+def _ref(geoms, n_per=200):
+    pts = eval_param_poly3(geoms, n_per=n_per)
+    s_pts = np.concatenate([np.linspace(g[0], g[0] + g[4], n_per) for g in geoms])
+    hd = np.unwrap(np.arctan2(np.gradient(pts[:, 1]), np.gradient(pts[:, 0])))
+    return pts, s_pts, hd, float(sum(g[4] for g in geoms))
+
+
+def add_signal_structures(r, road: Road, geoms) -> int:
+    """Signal poles (``road.meta["poles"]``: x, y, height, radius) as <object
+    type="pole">, and traffic signal heads (``road.meta["signal_heads"]``: x, y,
+    bottom, top, width, contact) as <signal type="1000001"> (a traffic light)
+    for the traffic coming in at that end of the road, with the head's real
+    position in <positionInertial>."""
+    poles = (road.meta or {}).get("poles") or []
+    heads = (road.meta or {}).get("signal_heads") or []
+    if not poles and not heads:
+        return 0
+    pts, s_pts, hd, L = _ref(geoms)
+    if poles:
+        objs = r.find("objects")
+        if objs is None:
+            objs = ET.SubElement(r, "objects")
+        for k, q in enumerate(poles):
+            i = int(np.argmin(np.hypot(pts[:, 0] - q["x"], pts[:, 1] - q["y"])))
+            h = float(hd[i])
+            t0 = (q["x"] - pts[i, 0]) * -math.sin(h) + (q["y"] - pts[i, 1]) * math.cos(h)
+            ET.SubElement(objs, "object", id=str(road.id * 100 + 50 + k), type="pole", name="signal pole", s=_f(float(np.clip(s_pts[i], 0, L))), t=_f(t0),
+                          zOffset="0", hdg="0", pitch="0", roll="0", orientation="none",
+                          height=_f(q["height"]), radius=_f(q["radius"]), validLength="0")
+    if heads:
+        sigs = ET.SubElement(r, "signals")
+        for k, q in enumerate(heads):
+            at_end = q.get("contact") == "end"
+            i = len(pts) - 1 if at_end else 0
+            h = float(hd[i])
+            u = np.array([math.cos(h), math.sin(h)])
+            n = np.array([-u[1], u[0]])
+            rel = np.array([q["x"], q["y"]]) - pts[i]
+            t0 = float(rel @ n)
+            face = h + (math.pi if at_end else 0.0)        # looks back at the traffic coming in
+            sg = ET.SubElement(sigs, "signal", s=_f(L if at_end else 0.0), t=_f(t0),
+                               id=str(road.id * 100 + 70 + k), name="traffic light",
+                               dynamic="yes", orientation="+" if at_end else "-",
+                               zOffset=_f(q["bottom"]), country="OpenDRIVE", type="1000001", subtype="-1",
+                               value="-1", height=_f(q["top"] - q["bottom"]), width=_f(max(q["width"], 0.3)),
+                               hOffset="0", pitch="0", roll="0")
+            ET.SubElement(sg, "positionInertial", x=_f(q["x"]), y=_f(q["y"]), z=_f(q.get("ground_z", 0.0) + q["bottom"]),
+                          hdg=_f(math.atan2(math.sin(face), math.cos(face))), pitch="0", roll="0")
+    return len(poles) + len(heads)
 
 
 def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cfg: dict,

@@ -396,6 +396,10 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         name = next((n for n in pipeline.marking_sources(p) if pipeline._slug(n) == src or n == src), src)
         return {"removed": pipeline.remove_marking_source(p, cfg(), name)}
 
+    @app.get("/api/maps/{slug}/signals")
+    def signals_(slug: str):
+        return pipeline.load_signals(project(slug))
+
     @app.get("/api/maps/{slug}/junctions")
     def junctions(slug: str):
         f = project(slug).root / "junctions.json"

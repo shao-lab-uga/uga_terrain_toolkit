@@ -906,6 +906,10 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     origin = tuple(project.meta.get("origin") or (0.0, 0.0, 0.0))
     progress.set("export", 0, 5, "OpenDRIVE")
     names = project.road_names()
+    progress.set("export", 0, 5, "lidar point cloud and signal poles")
+    from uga_terrain import lidar_map
+    n_lidar = lidar_map.write(project, out / "lidar.ply")
+    find_signals(project, cfg, progress=progress)
     xinfo = write_xodr(project, cfg, grid, found)
     progress.set("export", 1, 5, "road profile CSV")
     export.write_profile_csv(found, out / "road_profile.csv")
@@ -930,9 +934,6 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     export.write_trajectory_csv(rows, out / "trajectory.csv")
     progress.set("export", 2, 5, "ground point cloud")
     n_pts = export.write_ground_ply(grid, out / "ground.ply")
-    progress.set("export", 2, 5, "lidar point cloud")
-    from uga_terrain import lidar_map
-    n_lidar = lidar_map.write(project, out / "lidar.ply")
     progress.set("export", 3, 5, "elevation rasters")
     rdir = out / "rasters"
     if rdir.exists():
@@ -975,9 +976,73 @@ def write_xodr(project: Project, cfg: dict, grid: Optional[TerrainGrid] = None, 
     origin = tuple(project.meta.get("origin") or (0.0, 0.0, 0.0))
     name = _slug(project.name)
     project.out.mkdir(parents=True, exist_ok=True)
+    _place_signals(project, found)
     return xodr.write_xodr(found, origin, cfg, project.out / ("%s.xodr" % name), name=name,
                            road_names=project.road_names(), junctions=load_junctions(project),
                            ground=lambda x, y: grid.sample(x, y, "z"), edits=project.edits())
+
+
+def load_signals(project: Project) -> List[dict]:
+    f = project.root / "signals.json"
+    return json.loads(f.read_text()) if f.is_file() else []
+
+
+def find_signals(project: Project, cfg: dict, juncs=None, progress=None) -> List[dict]:
+    """Signal span (wires, corner poles, signal heads) at each junction, from
+    lidar.ply; saved to signals.json."""
+    from uga_terrain import lidar_map, signals
+    f = project.out / "lidar.ply"
+    juncs = juncs if juncs is not None else load_junctions(project)
+    out = []
+    if f.is_file() and juncs and (cfg.get("signals") or {}).get("detect", True):
+        cloud = lidar_map.read(f)
+        for jn in juncs:
+            try:
+                res = signals.detect(cloud, (jn.x, jn.y))
+            except Exception as e:  # a failed search must not stop the export
+                if progress is not None:
+                    progress.note("Junction %d: looking for signal poles failed (%s)." % (jn.id, e))
+                continue
+            res["junction"] = jn.id
+            out.append(res)
+            if progress is not None:
+                progress.note("Junction %d: %d signal poles (%s), %d span wires, %d signal heads." % (
+                    jn.id, len(res["poles"]), ", ".join("%.1f m" % q["height"] for q in res["poles"]),
+                    len(res["wires"]), len(res["heads"])))
+    export.save_json(out, project.root / "signals.json")
+    return out
+
+
+def _place_signals(project: Project, roads) -> None:
+    """Hang the found poles and signal heads on roads for the .xodr: a pole on
+    the nearest road, a head on the incoming road whose lanes it is over."""
+    for r in roads:
+        r.meta.pop("poles", None)
+        r.meta.pop("signal_heads", None)
+    sig = load_signals(project)
+    if not sig or not roads:
+        return
+    for res in sig:
+        jid = res.get("junction")
+        for q in res.get("poles", []):
+            r = min(roads, key=lambda r_: float(np.min(np.hypot(r_.x - q["x"], r_.y - q["y"]))))
+            r.meta.setdefault("poles", []).append(q)
+        ends = []
+        for r in roads:
+            for contact, i, sgn in (("end", -1, 1.0), ("start", 0, -1.0)):
+                if r.meta.get("junction_" + contact) == jid:
+                    h = float(r.heading[i]) + (0.0 if sgn > 0 else math.pi)
+                    ends.append((r, contact, np.array([r.x[i], r.y[i]]), np.array([math.cos(h), math.sin(h)])))
+        for q in res.get("heads", []):
+            best = None
+            for r, contact, e, u in ends:
+                rel = np.array([q["x"], q["y"]]) - e
+                ahead, side = float(rel @ u), abs(float(rel @ np.array([-u[1], u[0]])))
+                if 0.0 < ahead < 45.0 and (best is None or side < best[0]):
+                    best = (side, r, contact)
+            if best is not None:
+                g = q.get("ground_z")
+                best[1].meta.setdefault("signal_heads", []).append(dict(q, contact=best[2], ground_z=g if g is not None else 0.0))
 
 
 def check_xodr(project: Project) -> dict:
