@@ -161,7 +161,7 @@ def detect(lidar: np.ndarray, centre, radius: float = 40.0) -> dict:
     near = np.hypot(lidar["x"] - centre[0], lidar["y"] - centre[1]) < radius + 15
     L = lidar[near]
     G = np.c_[L["x"], L["y"], L["z"]][L["ground"] == 1]
-    O = L[(L["ground"] == 0) & (L["hits"] >= 2)]
+    O = L[L["ground"] == 0]                 # every scan counts: sparse scans see a wire once
     P = np.c_[O["x"], O["y"], O["z"]]
     if len(G) < 100 or len(P) < 100:
         return {"wires": [], "poles": [], "heads": []}
@@ -212,13 +212,25 @@ def detect(lidar: np.ndarray, centre, radius: float = 40.0) -> dict:
             b_ = np.array([B["x"], B["y"]])
             seen = [W[k] for k in keep if _on_edge(W[k], a_, b_)]
             hgt = float(np.median([w["h"] for w in seen])) if seen else None
+            # where the wire was seen, follow its measured line (heads hang under it)
+            if seen:
+                w0 = max(seen, key=lambda w: w["a1"] - w["a0"])
+                ha = w0["p"] + w0["d"] * float((a_ - w0["p"]) @ w0["d"])
+                hb = w0["p"] + w0["d"] * float((b_ - w0["p"]) @ w0["d"])
+            else:
+                ha, hb = a_, b_
             wires.append({"id": len(wires), "poles": [A["id"], B["id"]], "a": a_.tolist(), "b": b_.tolist(),
+                          "line": [np.round(ha, 2).tolist(), np.round(hb, 2).tolist()],
                           "height": round(hgt, 2) if hgt is not None else None,
                           "seen_m": round(float(sum(w["a1"] - w["a0"] for w in seen)), 1),
                           "length": round(float(np.hypot(*(b_ - a_))), 1)})
+    # heads: points seen in 2+ scans, when the scans are dense enough for that
+    # (a passing truck or noise otherwise merges with the heads)
+    steady = O["hits"] >= 2
+    Ph, hh = (P[steady], h[steady]) if steady.mean() > 0.3 else (P, h)
     heads = []
     for w in wires:
-        heads += _heads(P, h, np.array(w["a"]), np.array(w["b"]), w["height"] or 6.5)
+        heads += _heads(Ph, hh, np.array(w["line"][0]), np.array(w["line"][1]), w["height"] or 6.5)
     for i, hd in enumerate(heads):
         hd["id"] = i
         hd["ground_z"] = round(float(ground_height(G, np.array([hd["x"]]), np.array([hd["y"]]))[0]), 2)
@@ -236,15 +248,27 @@ def _on_edge(w, a, b) -> bool:
 
 def _heads(P, h, a, b, wire_h) -> List[dict]:
     """Signal heads hanging from the wire a -> b: compact blobs 0.6-2.2 m tall,
-    0.25-2 m wide, just under the wire, with nothing (no tree) above them."""
+    0.25-2 m wide, just under the wire, not inside a tree (much more above than below)."""
     L = float(np.hypot(*(b - a)))
     u = (b - a) / max(L, 1e-6)
     n = np.array([-u[1], u[0]])
     rel = P[:, :2] - a
     s, t = rel @ u, rel @ n
     band = (np.abs(t) < 1.2) & (s > 1.5) & (s < L - 1.5)
-    under = band & (h > wire_h - 3.0) & (h < wire_h - 0.2)
-    above = band & (h > wire_h + 0.8) & (h < wire_h + 6.0)
+    # the wire sags: take its height locally as the top of what hangs there
+    # (95th percentile per 1 m along it), falling back to wire_h
+    sb = np.floor(s / 1.0).astype(int)
+    hang = band & (h > wire_h - 3.5) & (h < wire_h + 1.0)
+    top = np.full(int(np.ceil(L)) + 2, float(wire_h))
+    if hang.any():
+        k = np.clip(sb[hang], 0, len(top) - 1)
+        for b in np.unique(k):
+            v = h[hang][k == b]
+            if len(v) >= 5:
+                top[b] = min(float(np.percentile(v, 95)), wire_h + 1.0)
+    wl = top[np.clip(sb, 0, len(top) - 1)]
+    under = band & (h > wl - 3.0) & (h < wl - 0.25)
+    above = band & (h > wl + 0.8) & (h < wl + 6.0)
     out = []
     if under.sum() < 10:
         return out
@@ -252,13 +276,27 @@ def _heads(P, h, a, b, wire_h) -> List[dict]:
     order = np.argsort(ss)
     ss, hh, tt = ss[order], hh[order], tt[order]
     sa = np.sort(s[above])
+    groups = []
     for sg in np.split(np.arange(len(ss)), np.flatnonzero(np.diff(ss) > 0.5) + 1):
+        if len(sg) >= 15 and ss[sg[-1]] - ss[sg[0]] > 2.0:
+            # heads side by side: split at the thin spots of the profile along the wire
+            nb = int(np.ceil((ss[sg[-1]] - ss[sg[0]]) / 0.1)) + 1
+            cnt = np.bincount(((ss[sg] - ss[sg[0]]) / 0.1).astype(int), minlength=nb).astype(float)
+            sm = np.convolve(cnt, np.ones(3) / 3, mode="same")
+            thin = sm < 0.25 * np.median(sm[sm > 0])
+            lab = np.cumsum(np.r_[0, np.diff(thin.astype(int)) != 0])
+            bins = ((ss[sg] - ss[sg[0]]) / 0.1).astype(int)
+            for v in np.unique(lab[~thin]):
+                groups.append(sg[np.isin(bins, np.flatnonzero((lab == v) & ~thin))])
+        else:
+            groups.append(sg)
+    for sg in groups:
         if len(sg) < 15:
             continue
         s0, s1 = ss[sg[0]], ss[sg[-1]]
         top, bot = np.percentile(hh[sg], 98), np.percentile(hh[sg], 2)
-        n_above = np.searchsorted(sa, s1 + 0.5) - np.searchsorted(sa, s0 - 0.5)
-        if not (0.25 <= s1 - s0 <= 2.0 and 0.6 <= top - bot <= 2.2) or n_above > 0.5 * len(sg):
+        n_above = np.searchsorted(sa, s1 + 0.2) - np.searchsorted(sa, s0 - 0.2)
+        if not (0.25 <= s1 - s0 <= 2.0 and 0.6 <= top - bot <= 2.2) or n_above > 2 * len(sg):
             continue
         xy = a + u * 0.5 * (s0 + s1) + n * float(np.median(tt[sg]))
         out.append({"x": round(float(xy[0]), 2), "y": round(float(xy[1]), 2),
