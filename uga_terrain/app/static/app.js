@@ -1347,7 +1347,71 @@ async function open3D() {
       box.hidden = false;
     }
   };
+  // --- lidar layer: every lidar point, loaded the first time it is switched on --------
+  const lidMat = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true });
+  let lid = null, lidLoading = false;
+  const groundAt = (x, y) => {      // ground height under a point (nearest grid cell, NaN off the map)
+    const c = Math.floor((x - x0) / px), r = Math.floor((y1 - y) / px);
+    if (c < 0 || c >= W || r < 0 || r >= H) return NaN;
+    return Z[r * W + c];
+  };
+  const lidarUpdate = async () => {
+    const on = $("three-lidar").checked;
+    $("three-lidar-opts").hidden = !on;
+    if (!on) { if (lid) lid.points.visible = false; return; }
+    if (!lid) {
+      if (lidLoading) return;
+      lidLoading = true;
+      let b;
+      try { b = await api(`/api/maps/${map}/lidar?max_points=2500000`); }
+      catch (e) { lidLoading = false; $("three-lidar").checked = false; $("three-lidar-opts").hidden = true; toast(e.message, true); return; }
+      if (map !== S.map || !alive) return;
+      const n = new DataView(b).getUint32(0, true);
+      const xyz = new Float32Array(b.slice(4, 4 + 12 * n));
+      const it = new Uint8Array(b, 4 + 12 * n, n), gr = new Uint8Array(b, 4 + 13 * n, n), hits = new Uint8Array(b, 4 + 14 * n, n);
+      const hag = new Float32Array(n);
+      // ground under each point: the map's ground grid, else the nearest ground point's column is unknown -> use median
+      for (let i = 0; i < n; i++) { const g = groundAt(xyz[3 * i], xyz[3 * i + 1]); hag[i] = Number.isFinite(g) ? xyz[3 * i + 2] - g : xyz[3 * i + 2] - zmid; }
+      const g2 = new THREE.BufferGeometry();
+      g2.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3 * n), 3));
+      g2.setAttribute("color", new THREE.BufferAttribute(new Float32Array(3 * n), 3));
+      lid = { n, xyz, it, gr, hits, hag, geom: g2, points: new THREE.Points(g2, lidMat) };
+      scene.add(lid.points);
+      lidLoading = false;
+    }
+    const ex = Number($("three-exag").value), mode = $("three-lidar-color").value;
+    const all = $("three-lidar-what").value === "all", steady = $("three-lidar-static").checked;
+    const P = lid.geom.attributes.position.array, C = lid.geom.attributes.color.array;
+    let m = 0;
+    for (let i = 0; i < lid.n; i++) {
+      if (!all && lid.gr[i]) continue;
+      if (steady && lid.hits[i] < 4) continue;
+      const z = lid.xyz[3 * i + 2];
+      // keep the ground where the surface is drawn: lift by the same exaggeration as the ground,
+      // and keep the true height of things above it
+      const g = z - lid.hag[i];
+      P[3 * m] = lid.xyz[3 * i] - cx; P[3 * m + 1] = lid.xyz[3 * i + 1] - cy;
+      P[3 * m + 2] = (g - zmid) * ex + lid.hag[i];
+      let rgb;
+      if (mode === "intensity") { const v = lid.it[i] / 255; rgb = [40 + 215 * v, 40 + 215 * v, 40 + 215 * v]; }
+      else if (mode === "height") rgb = rampColor("terrain", Math.min(Math.max(lid.hag[i] / 8, 0), 1));
+      else rgb = lid.gr[i] ? [150, 140, 120] : [214, 60, 50];
+      C[3 * m] = toLinear(rgb[0] / 255); C[3 * m + 1] = toLinear(rgb[1] / 255); C[3 * m + 2] = toLinear(rgb[2] / 255);
+      m++;
+    }
+    lid.geom.setDrawRange(0, m);
+    lid.geom.attributes.position.needsUpdate = true;
+    lid.geom.attributes.color.needsUpdate = true;
+    lid.geom.computeBoundingSphere();
+    lidMat.size = Number($("three-lidar-size").value);
+    lid.points.visible = true;
+  };
+  const lidIds = ["three-lidar", "three-lidar-color", "three-lidar-what", "three-lidar-static", "three-lidar-size", "three-exag"];
+  const lidarOnInput = () => { lidarUpdate(); };
+  lidIds.forEach((id) => $(id).addEventListener("input", lidarOnInput));
+
   update();
+  lidarUpdate();
   const ids = ["three-color", "three-exag", "three-size", "three-style"];
   ids.forEach((id) => $(id).addEventListener("input", update));
   $("three-home").onclick = home;
@@ -1362,6 +1426,9 @@ async function open3D() {
   S.three = { resize, dispose: () => {
     alive = false;
     ids.forEach((id) => $(id).removeEventListener("input", update));
+    lidIds.forEach((id) => $(id).removeEventListener("input", lidarOnInput));
+    if (lid) lid.geom.dispose();
+    lidMat.dispose();
     $("three-legend").hidden = true;
     geom.dispose(); surfMat.dispose(); ptsMat.dispose(); controls.dispose();
     if (reliefMat) { reliefMat.map.dispose(); reliefMat.dispose(); }

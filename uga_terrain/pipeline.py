@@ -164,7 +164,7 @@ def list_projects(cfg: dict) -> List[dict]:
 # --- step 1: scan --------------------------------------------------------------------------
 
 _SCAN_KEYS = ("topics", "frames", "pose", "lidar", "odometry", "ground")
-SCAN_VERSION = 4   # bump when scan output changes, so old caches are rebuilt
+SCAN_VERSION = 5   # bump when scan output changes, so old caches are rebuilt
 
 
 def clean_range(r) -> Optional[dict]:
@@ -274,9 +274,13 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
     gvox = float(gcfg.get("voxel") or 0.1)
     ego = lid.get("ego_box")
     fdir = out / "frames"
-    if fdir.exists():
-        shutil.rmtree(fdir)
-    fdir.mkdir(parents=True)
+    odir = out / "objects"            # everything above the ground, for the 3D lidar layer
+    for d_ in (fdir, odir):
+        if d_.exists():
+            shutil.rmtree(d_)
+        d_.mkdir(parents=True)
+    omax = float(lid.get("object_max_range") or 50.0)
+    ovox = float(lid.get("object_voxel") or 0.15)
     ts, Gs, Bs, oks = [], [], [], []
     heights = []
     anchor = None
@@ -337,6 +341,9 @@ def scan_recording(path: str, cfg: dict, origin, out: Path, progress: Progress,
         g = voxel_down(g, gvox)
         k = len(ts)
         np.save(fdir / ("%06d.npy" % k), g.astype(np.float32))
+        o = base[~gmask]
+        o = voxel_down(o[np.hypot(o[:, 0], o[:, 1]) <= omax], ovox)
+        np.save(odir / ("%06d.npy" % k), o.astype(np.float32))
         near = g[(np.hypot(g[:, 0], g[:, 1]) > 3) & (np.hypot(g[:, 0], g[:, 1]) < 10)]
         if len(near) > 20:
             heights.append(float(np.median(near[:, 2])))
@@ -923,6 +930,9 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     export.write_trajectory_csv(rows, out / "trajectory.csv")
     progress.set("export", 2, 5, "ground point cloud")
     n_pts = export.write_ground_ply(grid, out / "ground.ply")
+    progress.set("export", 2, 5, "lidar point cloud")
+    from uga_terrain import lidar_map
+    n_lidar = lidar_map.write(project, out / "lidar.ply")
     progress.set("export", 3, 5, "elevation rasters")
     rdir = out / "rasters"
     if rdir.exists():
@@ -944,7 +954,7 @@ def step_export(project: Project, cfg: dict, progress: Progress,
                        "sidewalk_left_pct": _pct_pos(r.data.get("walk_l")),
                        "sidewalk_right_pct": _pct_pos(r.data.get("walk_r"))}
                       for r in found],
-        "scan": project.meta.get("scan"), "ground_points": n_pts,
+        "scan": project.meta.get("scan"), "ground_points": n_pts, "lidar_points": n_lidar,
         "files": sorted(str(p.relative_to(out)) for p in out.iterdir() if p.is_file()),
     }
     # check the .xodr as a simulator would read it, replaying the car's own path

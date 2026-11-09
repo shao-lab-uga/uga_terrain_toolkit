@@ -443,6 +443,23 @@ def create_app(crash_log: Optional[str] = None) -> FastAPI:
         return Response(head + xyz.tobytes() + a["label"].astype("u1").tobytes(),
                         media_type="application/octet-stream")
 
+    @app.get("/api/maps/{slug}/lidar")
+    def lidar(slug: str, max_points: int = Query(2000000, ge=1000, le=10000000)):
+        """All the lidar for the 3D Lidar layer: u32 n, f32 xyz[n*3],
+        u8 intensity (0-255, by percentile)[n], u8 ground[n], u8 hits (capped)[n]."""
+        from uga_terrain import lidar_map
+        f = project(slug).out / "lidar.ply"
+        if not f.is_file():
+            raise HTTPException(404, "rebuild this map from the start (Scan) to get the lidar layer")
+        a = lidar_map.read(f, max_points)
+        xyz = np.stack([a["x"], a["y"], a["z"]], 1).astype("<f4")
+        it = a["intensity"].astype(np.float64)
+        lo, hi = np.percentile(it, [1, 99]) if len(it) else (0.0, 1.0)
+        it8 = np.clip((it - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype("u1")
+        return Response(struct.pack("<I", len(a)) + xyz.tobytes() + it8.tobytes()
+                        + a["ground"].astype("u1").tobytes() + np.minimum(a["hits"], 255).astype("u1").tobytes(),
+                        media_type="application/octet-stream")
+
     @app.get("/api/maps/{slug}/surface")
     def surface(slug: str, max_px: int = Query(900, ge=64, le=2048)):
         """Height grid for the 3D view: u32 w, u32 h, f32 x0 y0 x1 y1, f32 z[h*w]

@@ -123,6 +123,20 @@
             <option value="surface">Solid surface</option>
             <option value="points">Points</option>
           </select></label>
+        <label title="Every lidar point of the map: buildings, poles, trees, signs and passing cars as well as the ground"><input type="checkbox" id="three-lidar"> Lidar</label>
+        <label id="three-lidar-opts" hidden>
+          <select id="three-lidar-color">
+            <option value="intensity">by intensity</option>
+            <option value="height">by height above ground</option>
+            <option value="ground">ground / above ground</option>
+          </select>
+          <select id="three-lidar-what">
+            <option value="above">above the ground only</option>
+            <option value="all">all points</option>
+          </select>
+          <label title="Hide points seen in only a few scans (mostly cars and people moving past)"><input type="checkbox" id="three-lidar-static"> steady only</label>
+          point size <input type="range" id="three-lidar-size" min="1" max="6" value="2">
+        </label>
         <label id="three-size-wrap" hidden>Point size <input type="range" id="three-size" min="1" max="8" value="2"></label>
         <label>Height exaggeration <input type="range" id="three-exag" min="1" max="10" step="0.5" value="3"></label>
         <button id="three-home" class="small">Reset view</button>
