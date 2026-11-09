@@ -432,7 +432,7 @@ def step_scan(project: Project, cfg: dict, progress: Progress) -> List[dict]:
         rng = project.range_of(path)
         key = _scan_key(path, cfg, origin, rng)
         meta_f = cdir / "meta.json"
-        if meta_f.is_file() and (cdir / "frames.npz").is_file():
+        if meta_f.is_file() and (cdir / "frames.npz").is_file() and (cdir / "objects").is_dir():
             meta = json.loads(meta_f.read_text())
             if meta.get("key") == key:
                 progress.note("%s: using cached scan" % Path(path).name)

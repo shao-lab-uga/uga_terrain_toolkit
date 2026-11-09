@@ -648,7 +648,7 @@ function mapLegend(p, layer) {
   lanesLegend(box);
 }
 function signalsWhyNot() {
-  const scan = "Rebuild this map once with Re-run from: Scan (it needs the lidar above the ground).";
+  const scan = "Press Build map once (or Re-run from: Scan) so the lidar above the ground is read.";
   if (!S.signals || !S.signals.length) return "Signal poles: none yet. " + scan;
   const sp = S.signals[0];
   if (!sp.version) return "Signal poles: searched by an older version. Re-run from: Export files.";
