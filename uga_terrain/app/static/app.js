@@ -404,6 +404,7 @@ function drawMap() {
     ctx.restore();
   }
   if ($("show-lanes").checked && S.lanes) drawLanes();
+  if (layer === "labels") drawSignals();      // signal poles and wires: Surface layer only (for now)
   if ($("show-drives").checked) {
     ctx.lineWidth = 1.5 * devicePixelRatio;
     ctx.strokeStyle = "rgba(43,108,176,.9)";
@@ -514,7 +515,6 @@ function drawLanes() {
       ctx.strokeStyle = "rgba(60,60,60,.9)"; ctx.lineWidth = 1 * dpr; ctx.stroke();
     }
   }
-  drawSignals();
 }
 // signal span from the lidar: wires (purple, dashed where not seen), poles (black dots), heads (amber)
 function drawSignals() {
@@ -631,6 +631,7 @@ function mapLegend(p, layer) {
     for (const c of Object.values(p.classes || {})) {
       box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${c.rgb.join(",")})` }), el("span", { class: "v" }, c.name)));
     }
+    signalsLegend(box);
     box.append(el("div", { class: "note" }, "Switch Layer to Elevation for heights."));
     lanesLegend(box);
     box.hidden = false;
@@ -646,6 +647,13 @@ function mapLegend(p, layer) {
   else legendBox(box, { title: "Lidar intensity", ramp, lo: p.min, hi: p.max, unit: "", digits: 0 });
   lanesLegend(box);
 }
+function signalsLegend(box) {
+  if (!(S.signals || []).some((sp) => (sp.poles || []).length)) return;
+  const row = (style, text) => box.append(el("div", { class: "st" }, el("span", { class: "sw", style }), el("span", { class: "v" }, text)));
+  row("background: #111; border-radius: 50%; border: 1px solid #fff", "signal pole (from lidar)");
+  row("background: transparent; border-top: 2px solid rgb(120,40,160); height: 0; margin-top: 7px", "span wire (dashed: not seen)");
+  row("background: #f4b400; border: 1px solid #222", "traffic light");
+}
 function lanesLegend(box) {
   if (!$("show-lanes").checked || !S.lanes || !S.lanes.lanes.length) return;
   box.append(el("div", { class: "t", style: "margin-top: 8px" }, "Lanes (OpenDRIVE)"));
@@ -657,11 +665,6 @@ function lanesLegend(box) {
   if ((S.lanes.markings || []).length) {
     row("background: repeating-linear-gradient(90deg, #fff 0 3px, #bbb 3px 6px); border: 1px solid #555", "crosswalk");
     row("background: #fff; border: 1px solid #555; height: 4px; margin-top: 5px", "stop line");
-  }
-  if ((S.signals || []).some((sp) => (sp.poles || []).length)) {
-    row("background: #111; border-radius: 50%; border: 1px solid #fff", "signal pole (lidar)");
-    row("background: transparent; border-top: 2px solid rgb(120,40,160); height: 0; margin-top: 7px", "span wire");
-    row("background: #f4b400; border: 1px solid #222", "traffic light");
   }
   row("background: #b5121b; height: 3px; margin-top: 6px", "driven path of the selected road");
 }
@@ -1363,6 +1366,7 @@ async function open3D() {
     geom.computeVertexNormals();
     geom.computeBoundingSphere();
     mesh.material = mode === "relief" && reliefMat ? reliefMat : surfMat;
+    sigGroup.visible = mode === "label";      // signal poles and wires: Surface colouring only (for now)
     mesh.visible = !asPoints;
     points.visible = asPoints;
     ptsMat.size = Number($("three-size").value);
@@ -1376,6 +1380,7 @@ async function open3D() {
       box.append(el("div", { class: "t" }, "Surface"));
       [["road", 1], ["sidewalk", 2], ["curb", 3], ["other ground", 4]].forEach(([name, k]) =>
         box.append(el("div", { class: "st" }, el("span", { class: "sw", style: `background: rgb(${SURFACE_RGB[k].join(",")})` }), el("span", { class: "v" }, name))));
+      signalsLegend(box);
       box.hidden = false;
     }
   };
