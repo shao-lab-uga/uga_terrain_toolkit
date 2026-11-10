@@ -126,3 +126,10 @@ xodr:
 
 signals:
   detect: true          # signal span (wires, corner poles, traffic lights) from the lidar at each junction
+
+# after the roads are found: fill gaps in the scan and tidy the surface labels
+# (filled cells are marked; measured heights are never changed)
+tidy:
+  enabled: true
+  hole_m: 6.0          # widest gap filled anywhere (trees, parked cars)
+  road_hole_m: 15.0    # widest gap filled on roads and in junctions

@@ -502,6 +502,8 @@ def step_map(project: Project, cfg: dict, progress: Progress) -> TerrainGrid:
 
 def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[TerrainGrid] = None):
     grid = grid or TerrainGrid.load(project.root / "grid")
+    from uga_terrain import tidy as tidy_mod
+    tidy_mod.untidy(grid)              # gaps filled last time: back to empty
     for t in grid.tiles.values():      # labels are recomputed from scratch
         t["label"] = np.where(np.isfinite(t["z"]), 4, 0).astype(np.float32)
     paths, frames = [], {}
@@ -612,6 +614,12 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
                     "%s%s" % (m["kind"].replace("_", " "),
                               " (copied from %s)" % m["copied_from"] if m.get("copied_from") else "")
                     for m in ms)))
+    progress.set("find roads", 1, 1, "tidying the surface")
+    res = tidy_mod.tidy(grid, juncs, cfg)
+    if res:
+        progress.note("Surface tidied: %.0f m2 of gaps filled (%.0f m2 of it on roads and junctions), "
+                      "%d speckled cells relabelled." % (res["filled_m2"], res["filled_road_m2"],
+                                                       res["relabelled_cells"]))
     gdir = project.root / "grid"
     grid.save(gdir)
     export.save_json(export.road_json(found), project.root / "roads.json")

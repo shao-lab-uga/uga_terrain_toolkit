@@ -386,11 +386,12 @@ function drawMap() {
   cv.width = w * devicePixelRatio; cv.height = h * devicePixelRatio;
   ctx.clearRect(0, 0, cv.width, cv.height);
   const layer = $("layer").value;
-  const p = S.previews[layer] || S.previews.elevation;
+  const roadLayer = layer === "road";
+  const p = roadLayer ? (S.previews.relief || S.previews.elevation) : (S.previews[layer] || S.previews.elevation);
   $("map-empty").hidden = !!p;
   if (!p) return;
   if (!S.view) fitView();
-  const img = getImage(layer in S.previews ? layer : "elevation");
+  const img = getImage(roadLayer ? (S.previews.relief ? "relief" : "elevation") : (layer in S.previews ? layer : "elevation"));
   if (img.complete && img.naturalWidth) {
     const [x0, y0, x1, y1] = p.extent;
     const [a, b] = toPx(x0, y1);
@@ -400,10 +401,13 @@ function drawMap() {
     ctx.save();
     ctx.translate(a, b);
     ctx.rotate(-S.view.rot);
+    if (roadLayer) ctx.filter = "grayscale(0.85) sepia(0.35) hue-rotate(40deg) saturate(1.4) brightness(1.05)";
     ctx.drawImage(img, 0, 0, (x1 - x0) * k, (y1 - y0) * k);
+    ctx.filter = "none";
     ctx.restore();
   }
-  if ($("show-lanes").checked && S.lanes) drawLanes();
+  if (roadLayer) drawRoadModel2D();
+  else if ($("show-lanes").checked && S.lanes) drawLanes();
   if (layer === "labels") drawSignals();      // signal poles and wires: Surface layer only (for now)
   if ($("show-drives").checked) {
     ctx.lineWidth = 1.5 * devicePixelRatio;
@@ -454,6 +458,82 @@ function drawMap() {
   mapLegend(p, layer);
 }
 // lanes from the exported .xodr: filled strips, edges, and the centre line
+// --- road model: the .xodr drawn as a finished street ------------------------------------
+// surfaces: lanes as asphalt / concrete, the junction filled with asphalt from its
+// curb-fitted outline; lines: centre lines, lane lines, edge lines, crosswalk bars, stop lines
+const RM = { asphalt: [58, 60, 64], shoulder: [84, 86, 90], border: [110, 108, 104], sidewalk: [196, 192, 182],
+  white: [240, 240, 236], yellow: [242, 194, 0], grass: [116, 140, 92] };
+function roadModel() {
+  if (!S.lanes) return null;
+  const polys = [], lines = [];
+  const kind = (t) => t === "driving" ? "asphalt" : t === "sidewalk" ? "sidewalk" : t === "shoulder" ? "shoulder" : t === "border" ? "border" : "shoulder";
+  for (const j of S.junctions || []) if (j.outline && j.outline.length > 2) polys.push({ pts: j.outline, c: "asphalt", lift: 0.02 });
+  for (const l of S.lanes.lanes) {
+    if (l.junction) { if (!(S.junctions || []).some((j) => j.outline && j.outline.length > 2)) polys.push({ strip: [l.inner, l.outer], c: "asphalt", lift: 0.02 }); continue; }
+    polys.push({ strip: [l.inner, l.outer], c: kind(l.type), lift: l.type === "sidewalk" ? 0.04 : 0.03 });
+  }
+  // lane lines: between two driving lanes on the same side white dashed, at the outer edge of the driving lanes white solid
+  const byRoad = {};
+  for (const l of S.lanes.lanes) if (!l.junction) (byRoad[l.road] = byRoad[l.road] || []).push(l);
+  for (const ls of Object.values(byRoad)) {
+    for (const side of [-1, 1]) {
+      const d = ls.filter((l) => Math.sign(l.lane) === side && l.type === "driving").sort((a, b) => Math.abs(a.lane) - Math.abs(b.lane));
+      d.forEach((l, i) => lines.push({ pts: l.outer, c: "white", w: 0.12, dash: i < d.length - 1 ? [3, 6] : null }));
+    }
+  }
+  for (const c of S.lanes.centre) if (!c.junction && c.mark !== "none") lines.push({ pts: c.line, c: "yellow", w: 0.12, dash: c.mark === "broken" ? [3, 6] : null });
+  for (const m of S.lanes.markings || []) {
+    const P = m.polygon;
+    if (m.type === "crosswalk" && P.length >= 4) {
+      // bars across the crossing, 0.5 m wide every 1.2 m (as on the 2D lanes view)
+      // the long sides (0-1, 3-2) run across the road; bars run with the traffic, stepped along them
+      const [a, b, c, d] = P, len = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(2, Math.round(len / 1.2));
+      const at = (p, q, f) => [p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f];
+      for (let k = 0; k < n; k++) {
+        const f0 = (k + 0.5) / n - 0.25 / len, f1 = f0 + 0.5 / len;
+        polys.push({ pts: [at(a, b, f0), at(a, b, f1), at(d, c, f1), at(d, c, f0)], c: "white", lift: 0.06 });
+      }
+    } else polys.push({ pts: P, c: "white", lift: 0.06 });
+  }
+  return { polys, lines };
+}
+function drawRoadModel2D() {
+  paintRoadModel(ctx, toPx, S.view.s * devicePixelRatio);
+}
+// draw the road model on any canvas: toP maps world x, y to canvas pixels, k is pixels per metre
+function paintRoadModel(g, toP, k) {
+  const m = roadModel();
+  if (!m) return;
+  const path = (pts, move = true) => pts.forEach(([x, y], i) => { const [px, py] = toP(x, y); (i === 0 && move) ? g.moveTo(px, py) : g.lineTo(px, py); });
+  const order = ["sidewalk", "border", "shoulder", "asphalt", "white"];
+  g.lineJoin = "round";
+  for (const name of order) for (const p of m.polys) {
+    if (p.c !== name) continue;
+    g.beginPath();
+    if (p.strip) { path(p.strip[0]); path([...p.strip[1]].reverse(), false); } else path(p.pts);
+    g.closePath();
+    g.fillStyle = `rgb(${RM[p.c]})`; g.fill();
+    if (p.c === "asphalt" || p.c === "sidewalk") { g.strokeStyle = `rgb(${RM[p.c]})`; g.lineWidth = Math.max(1, 0.05 * k); g.stroke(); }   // hide seams
+  }
+  for (const l of m.lines) {
+    g.beginPath(); path(l.pts);
+    g.setLineDash(l.dash ? l.dash.map((v) => v * k) : []);
+    g.lineWidth = Math.max(1, l.w * k); g.strokeStyle = `rgb(${RM[l.c]})`; g.stroke();
+  }
+  g.setLineDash([]);
+}
+function roadModelLegend(box) {
+  box.innerHTML = "";
+  box.append(el("div", { class: "t" }, "Road model (from the .xodr)"));
+  const row = (style, text) => box.append(el("div", { class: "st" }, el("span", { class: "sw", style }), el("span", { class: "v" }, text)));
+  row(`background: rgb(${RM.asphalt})`, "driving lanes and junction");
+  row(`background: rgb(${RM.shoulder})`, "shoulder");
+  row(`background: rgb(${RM.border})`, "border / curb");
+  row(`background: rgb(${RM.sidewalk})`, "sidewalk");
+  row(`background: rgb(${RM.grass})`, "other ground");
+  box.append(el("div", { class: "note" }, "Lanes, lines, stop lines and crosswalks from the OpenDRIVE file (what CARLA gets); the junction is filled out to its curbs. Signal poles show on the Surface layer."));
+  box.hidden = false;
+}
 function drawLanes() {
   const dpr = devicePixelRatio;
   const col = (l) => l.type === "sidewalk" ? [150, 150, 150] : l.type !== "driving" ? null
@@ -500,11 +580,11 @@ function drawLanes() {
     if (m.type === "crosswalk") {
       ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fill();
       ctx.save(); ctx.clip();
-      // bars along the crossing direction (the polygon's long sides are 0-1 and 2-3)
-      const [a, b, c] = P, len = Math.hypot(c[0] - b[0], c[1] - b[1]), n = Math.max(2, Math.round(len / (1.2 * S.view.s * dpr)));
+      // bars with the traffic, stepped along the long sides (0-1 and 3-2, across the road)
+      const [a, b, c, d] = P, len = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(2, Math.round(len / (1.2 * S.view.s * dpr)));
       ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.lineWidth = Math.max(1, 0.5 * S.view.s * dpr);
-      for (let k = 0; k <= n; k++) {
-        const f = k / n, p = [b[0] + (c[0] - b[0]) * f, b[1] + (c[1] - b[1]) * f], q = [a[0] + (P[3][0] - a[0]) * f, a[1] + (P[3][1] - a[1]) * f];
+      for (let k = 0; k < n; k++) {
+        const f = (k + 0.5) / n, p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], q = [d[0] + (c[0] - d[0]) * f, d[1] + (c[1] - d[1]) * f];
         ctx.beginPath(); ctx.moveTo(...p); ctx.lineTo(...q); ctx.stroke();
       }
       ctx.restore();
@@ -625,6 +705,7 @@ function mapLegend(p, layer) {
   const box = $("map-legend");
   const ramp = LAYER_MAP[layer];
   if (!p || !$("show-legend").checked) { box.hidden = true; return; }
+  if (layer === "road") { roadModelLegend(box); return; }
   if (!ramp) {          // surface classes
     box.innerHTML = "";
     box.append(el("div", { class: "t" }, "Surface"));
@@ -1325,6 +1406,31 @@ async function open3D() {
   }
   if (!reliefMat) [...$("three-color").options].forEach((o) => { if (o.value === "relief") o.disabled = true; });
   if (!reliefMat && $("three-color").value === "relief") $("three-color").value = "label";
+  // road model texture: the .xodr lanes, lines and crossings painted over grass, draped on the ground
+  const uvRelief = geom.attributes.uv, uvGrid = new THREE.BufferAttribute(new Float32Array(N * 2), 2);
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+    const i = r * W + c;
+    uvGrid.array[2 * i] = (c + 0.5) / W; uvGrid.array[2 * i + 1] = 1 - (r + 0.5) / H;
+  }
+  let roadMat = null;
+  const roadTexture = () => {
+    const res = Math.min(25, 4096 / Math.max(x1 - x0, y1 - y0));     // pixels per metre
+    const cvs = document.createElement("canvas");
+    cvs.width = Math.max(1, Math.round((x1 - x0) * res)); cvs.height = Math.max(1, Math.round((y1 - y0) * res));
+    const g = cvs.getContext("2d");
+    g.fillStyle = `rgb(${RM.grass})`; g.fillRect(0, 0, cvs.width, cvs.height);
+    // a little texture in the grass so slopes read under the light
+    for (let k = 0; k < cvs.width * cvs.height / 60; k++) {
+      const v = Math.random() * 12 - 6, r_ = (0.08 + 0.2 * Math.random()) * res;
+      g.fillStyle = `rgba(${RM.grass.map((c_) => Math.round(c_ + v))},0.6)`;
+      g.beginPath(); g.arc(Math.random() * cvs.width, Math.random() * cvs.height, r_, 0, 2 * Math.PI); g.fill();
+    }
+    paintRoadModel(g, (x, y) => [(x - x0) * res, (y1 - y) * res], res);
+    const t = new THREE.CanvasTexture(cvs);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return t;
+  };
   const mesh = new THREE.Mesh(geom, reliefMat || surfMat);
   mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
@@ -1377,14 +1483,18 @@ async function open3D() {
     geom.attributes.color.needsUpdate = true;
     geom.computeVertexNormals();
     geom.computeBoundingSphere();
-    mesh.material = mode === "relief" && reliefMat ? reliefMat : surfMat;
+    if (mode === "road" && !roadMat) roadMat = new THREE.MeshStandardMaterial({ map: roadTexture(), side: THREE.DoubleSide, roughness: 0.92, metalness: 0 });
+    mesh.material = mode === "relief" && reliefMat ? reliefMat : mode === "road" ? roadMat : surfMat;
+    const uvWant = mode === "road" ? uvGrid : uvRelief;
+    if (geom.attributes.uv !== uvWant) geom.setAttribute("uv", uvWant);
     sigGroup.visible = mode === "label";      // signal poles and wires: Surface colouring only (for now)
     mesh.visible = !asPoints;
     points.visible = asPoints;
     ptsMat.size = Number($("three-size").value);
     $("three-size-wrap").hidden = !asPoints;
     const origin = S.status && S.status.origin;
-    if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: mode === "relief" ? "relief" : "terrain", lo: zmin, hi: zmax, unit: "m",
+    if (mode === "road") roadModelLegend($("three-legend"));
+    else if (byZ) legendBox($("three-legend"), { title: "Elevation", ramp: mode === "relief" ? "relief" : "terrain", lo: zmin, hi: zmax, unit: "m",
       digits: zmax - zmin < 5 ? 2 : 1, asl: origin ? origin[2] : undefined });
     else {
       const box = $("three-legend");
@@ -1519,6 +1629,7 @@ async function open3D() {
     $("three-legend").hidden = true;
     geom.dispose(); surfMat.dispose(); ptsMat.dispose(); controls.dispose();
     if (reliefMat) { reliefMat.map.dispose(); reliefMat.dispose(); }
+    if (roadMat) { roadMat.map.dispose(); roadMat.dispose(); }
     renderer.dispose(); renderer.domElement.remove();
   } };
 }

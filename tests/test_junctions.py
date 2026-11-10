@@ -281,3 +281,31 @@ def test_signal_span_poles_wires_and_heads_found():
     assert len(res["wires"]) == 4 and sum(w["seen_m"] > 0 for w in res["wires"]) >= 3
     assert len(res["heads"]) == 2
     assert all(abs(h["bottom"] - 5.1) < 0.3 and abs(h["top"] - 6.2) < 0.3 for h in res["heads"])
+
+
+def test_tidy_fills_gaps_and_paints_junction_as_road():
+    from types import SimpleNamespace
+    from uga_terrain.grid import TerrainGrid
+    from uga_terrain import tidy
+    g = TerrainGrid(0.2, 128)
+    z = np.full((128, 128), 1.0, np.float32)
+    z[60:70, 60:70] = np.nan            # 2 m gap: filled
+    z[:, :20] = np.nan                  # open edge: left alone
+    lab = np.where(np.isfinite(z), 4, 0).astype(np.float32)
+    lab[:, 40:90] = 1                   # a road ...
+    lab[50, 50] = 4                     # ... with a speck of grass in it
+    lab[np.isnan(z)] = 0
+    nan = np.full_like(z, np.nan)
+    g.tiles[(0, 0)] = {"z": z, "label": lab, "filled": np.zeros_like(z), "slope_deg": nan.copy(),
+                       "aspect_deg": nan.copy()}
+    jn = SimpleNamespace(outline=[[20.0, 20.0], [24.0, 20.0], [24.0, 24.0], [20.0, 24.0]])
+    res = tidy.tidy(g, [jn], {})
+    t = g.tiles[(0, 0)]
+    assert np.isfinite(t["z"][60:70, 60:70]).all() and np.allclose(t["z"][60:70, 60:70], 1.0)
+    assert (t["filled"][60:70, 60:70] == tidy.TIDY_FILLED).all()
+    assert np.isnan(t["z"][:, :20]).all()
+    assert t["label"][50, 50] == 1
+    assert (t["label"][105:115, 105:115] == 1).all()      # inside the junction outline
+    assert res["filled_m2"] > 3.9
+    tidy.untidy(g)
+    assert np.isnan(g.tiles[(0, 0)]["z"][60:70, 60:70]).all()
