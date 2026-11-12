@@ -444,10 +444,10 @@ def add_signal_structures(r, road: Road, geoms) -> int:
                 bz = g["heads"][0].get("ground_z", 0.0)
             t0 = float((np.array([bx, by]) - pts[i]) @ n)
             # CARLA turns its model by the road heading plus hOffset (it ignores
-            # "orientation"); at hOffset 0 the arm points along +s. A quarter
-            # turn towards the road's centre puts the arm over the lanes, and the
-            # lights then face the traffic coming in on the pole's side.
-            h_off = -math.copysign(math.pi / 2, t0) if abs(t0) > 1e-6 else (math.pi / 2 if at_end else -math.pi / 2)
+            # "orientation"); at hOffset 0 the arm points along -s (seen in
+            # CARLA 0.9.16). A quarter turn puts the arm over the lanes, towards
+            # the road's centre, and the lights then face the traffic coming in.
+            h_off = math.copysign(math.pi / 2, t0) if abs(t0) > 1e-6 else (-math.pi / 2 if at_end else math.pi / 2)
             face = h + h_off
             top = max(q["top"] for q in g["heads"])
             wid = max(max(q["width"], 0.3) for q in g["heads"])
