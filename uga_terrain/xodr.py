@@ -443,7 +443,12 @@ def add_signal_structures(r, road: Road, geoms) -> int:
             if bz is None:
                 bz = g["heads"][0].get("ground_z", 0.0)
             t0 = float((np.array([bx, by]) - pts[i]) @ n)
-            face = h + (math.pi if at_end else 0.0)        # looks back at the traffic coming in
+            # CARLA turns its model by the road heading plus hOffset (it ignores
+            # "orientation"); at hOffset 0 the arm points along +s. A quarter
+            # turn towards the road's centre puts the arm over the lanes, and the
+            # lights then face the traffic coming in on the pole's side.
+            h_off = -math.copysign(math.pi / 2, t0) if abs(t0) > 1e-6 else (math.pi / 2 if at_end else -math.pi / 2)
+            face = h + h_off
             top = max(q["top"] for q in g["heads"])
             wid = max(max(q["width"], 0.3) for q in g["heads"])
             sg = ET.SubElement(sigs, "signal", s=_f(L if at_end else 0.0), t=_f(t0),
@@ -451,7 +456,7 @@ def add_signal_structures(r, road: Road, geoms) -> int:
                                dynamic="yes", orientation="+" if at_end else "-",
                                zOffset="0", country="OpenDRIVE", type="1000001", subtype="-1",
                                value="-1", height=_f(top), width=_f(wid),
-                               hOffset="0", pitch="0", roll="0")
+                               hOffset=_f(h_off), pitch="0", roll="0")
             ET.SubElement(sg, "positionInertial", x=_f(bx), y=_f(by), z=_f(bz),
                           hdg=_f(math.atan2(math.sin(face), math.cos(face))), pitch="0", roll="0")
             for j, q in enumerate(g["heads"]):
