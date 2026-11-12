@@ -1052,7 +1052,10 @@ def _place_signals(project: Project, roads) -> None:
                     best = (side, r, contact)
             if best is not None:
                 g = q.get("ground_z")
-                best[1].meta.setdefault("signal_heads", []).append(dict(q, contact=best[2], ground_z=g if g is not None else 0.0))
+                best[1].meta.setdefault("signal_heads", []).append(dict(
+                    q, contact=best[2], ground_z=g if g is not None else 0.0,
+                    span_poles=[dict(x=p_["x"], y=p_["y"], id=p_.get("id"), ground_z=p_.get("ground_z"))
+                                for p_ in res.get("poles", [])]))
 
 
 def check_xodr(project: Project) -> dict:

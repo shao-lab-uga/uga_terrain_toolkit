@@ -388,8 +388,9 @@ def add_signal_structures(r, road: Road, geoms) -> int:
     """Signal poles (``road.meta["poles"]``: x, y, height, radius) as <object
     type="pole">, and traffic signal heads (``road.meta["signal_heads"]``: x, y,
     bottom, top, width, contact) as <signal type="1000001"> (a traffic light)
-    for the traffic coming in at that end of the road, with the head's real
-    position in <positionInertial>."""
+    for the traffic coming in at that end of the road. The signal stands at
+    the span's corner pole (zOffset 0), as simulators draw a whole pole there;
+    the measured heads are kept in <userData>."""
     poles = (road.meta or {}).get("poles") or []
     heads = (road.meta or {}).get("signal_heads") or []
     if not poles and not heads:
@@ -408,23 +409,56 @@ def add_signal_structures(r, road: Road, geoms) -> int:
                           height=_f(q["height"]), radius=_f(q["radius"]), validLength="0")
     if heads:
         sigs = ET.SubElement(r, "signals")
-        for k, q in enumerate(heads):
+        # Simulators (CARLA) do not draw the measured head: they stand their own
+        # traffic-light model (pole, arm, light) on the ground at the signal's
+        # s/t and lift it by zOffset. So each light is written where its pole
+        # stands - the corner pole of the span on the right of the incoming
+        # traffic - with zOffset 0, one per pole and approach. The measured
+        # heads (position, height, size) go along in <userData>.
+        groups = {}
+        for q in heads:
             at_end = q.get("contact") == "end"
             i = len(pts) - 1 if at_end else 0
             h = float(hd[i])
             u = np.array([math.cos(h), math.sin(h)])
             n = np.array([-u[1], u[0]])
-            rel = np.array([q["x"], q["y"]]) - pts[i]
-            t0 = float(rel @ n)
+            travel = u if at_end else -u                    # direction of the traffic coming in
+            right = np.array([travel[1], -travel[0]])
+            cand = []
+            for p_ in q.get("span_poles") or []:
+                rel = np.array([p_["x"], p_["y"]]) - pts[i]
+                if float(rel @ right) > 0.5:
+                    cand.append((float(np.hypot(*rel)), p_))
+            if cand:
+                p_ = min(cand, key=lambda c: c[0])[1]
+                key = (at_end, p_.get("id"), round(p_["x"], 1), round(p_["y"], 1))
+                base = (p_["x"], p_["y"], p_.get("ground_z"))
+            else:                                           # no pole found: the head's own spot
+                key = (at_end, None, round(q["x"], 1), round(q["y"], 1))
+                base = (q["x"], q["y"], q.get("ground_z", 0.0))
+            groups.setdefault(key, {"at_end": at_end, "i": i, "h": h, "n": n, "base": base, "heads": []})["heads"].append(q)
+        for k, g in enumerate(groups.values()):
+            at_end, i, h, n = g["at_end"], g["i"], g["h"], g["n"]
+            bx, by, bz = g["base"]
+            if bz is None:
+                bz = g["heads"][0].get("ground_z", 0.0)
+            t0 = float((np.array([bx, by]) - pts[i]) @ n)
             face = h + (math.pi if at_end else 0.0)        # looks back at the traffic coming in
+            top = max(q["top"] for q in g["heads"])
+            wid = max(max(q["width"], 0.3) for q in g["heads"])
             sg = ET.SubElement(sigs, "signal", s=_f(L if at_end else 0.0), t=_f(t0),
                                id=str(road.id * 100 + 70 + k), name="traffic light",
                                dynamic="yes", orientation="+" if at_end else "-",
-                               zOffset=_f(q["bottom"]), country="OpenDRIVE", type="1000001", subtype="-1",
-                               value="-1", height=_f(q["top"] - q["bottom"]), width=_f(max(q["width"], 0.3)),
+                               zOffset="0", country="OpenDRIVE", type="1000001", subtype="-1",
+                               value="-1", height=_f(top), width=_f(wid),
                                hOffset="0", pitch="0", roll="0")
-            ET.SubElement(sg, "positionInertial", x=_f(q["x"]), y=_f(q["y"]), z=_f(q.get("ground_z", 0.0) + q["bottom"]),
+            ET.SubElement(sg, "positionInertial", x=_f(bx), y=_f(by), z=_f(bz),
                           hdg=_f(math.atan2(math.sin(face), math.cos(face))), pitch="0", roll="0")
+            for j, q in enumerate(g["heads"]):
+                ET.SubElement(sg, "userData", code="measured_head_%d" % j,
+                              value="x=%s y=%s z_bottom=%s z_top=%s width=%s" % (
+                                  _f(q["x"]), _f(q["y"]), _f(q.get("ground_z", 0.0) + q["bottom"]),
+                                  _f(q.get("ground_z", 0.0) + q["top"]), _f(q["width"])))
     return len(poles) + len(heads)
 
 
