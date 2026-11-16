@@ -898,6 +898,12 @@ def check(xodr_path, trajectories: Sequence = (), left_hand: bool = False) -> di
     check_lane_joins(roads, juncs, rep)
     widths = lane_width_stats(roads, rep)
     topo = check_topology(roads, juncs, rep)
+    try:
+        from uga_terrain import drive_sim
+        drive = drive_sim.drive(roads, juncs, rep)
+    except Exception as e:                    # the drive test must never stop the check
+        rep.add("info", "drive_failed", "the drive test could not run: %s" % e)
+        drive = None
     replays = []
     for tp in trajectories:
         tr = read_trajectory(tp)
@@ -917,7 +923,8 @@ def check(xodr_path, trajectories: Sequence = (), left_hand: bool = False) -> di
          "outgoing": (by_id[c["connecting"]].succ or {}).get("id") if c["connecting"] in by_id else None,
          "lanes": c["lanes"]} for c in j.connections]} for j in juncs]
     return {"file": str(xodr_path), "counts": rep.counts(), "findings": rep.items,
-            "lane_widths": widths, "topology": topo, "junctions": jlist, "replay": replays}
+            "lane_widths": widths, "topology": topo, "junctions": jlist, "replay": replays,
+            "drive_test": drive}
 
 
 def text_report(res: dict) -> str:

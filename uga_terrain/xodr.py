@@ -215,6 +215,45 @@ def _one_way(per_side: dict, offset: np.ndarray, how: str):
     return per_side, offset
 
 
+def _tidy_lane_widths(per_side: dict, offset, centre_mark, painted: bool, target: float, widest: float):
+    """Two fixes for lane widths that a driving simulator gets wrong:
+
+    * one driving lane each way, much narrower than the other, with no painted
+      centre line (a street nobody drove) or narrower than 2.5 m: the centre
+      was misplaced, so split the roadway evenly;
+    * a driving lane wider than ``widest`` whose outer edge is not painted
+      runs from the centre to the curb over the gutter and parking space:
+      keep ``target`` metres as the driving lane and give the rest to a
+      shoulder lane outside it (widening an existing shoulder)."""
+    drv = {side: [k for k, e in enumerate(per_side[side]) if e[0] == "driving"] for side in ("l", "r")}
+    if len(drv["l"]) == 1 and len(drv["r"]) == 1 and drv["l"][0] == 0 and drv["r"][0] == 0:
+        (tl, wl, ml), (tr, wr, mr) = per_side["l"][0], per_side["r"][0]
+        wl, wr = np.asarray(wl, float), np.asarray(wr, float)
+        narrow, wide = np.median(np.minimum(wl, wr)), np.median(np.maximum(wl, wr))
+        if narrow < 0.75 * wide and (not centre_mark or narrow < 2.5):
+            half = 0.5 * (wl + wr)
+            offset = offset + wl - half
+            per_side["l"][0], per_side["r"][0] = (tl, half, ml), (tr, half, mr)
+    for side in ("l", "r"):
+        if not drv[side]:
+            continue
+        k = drv[side][-1]
+        lt, w, mark = per_side[side][k]
+        w = np.asarray(w, float)
+        edge_painted = painted and mark is not None and mark[0] == "solid"
+        if edge_painted or np.median(w) <= widest:
+            continue
+        keep = np.minimum(w, target)
+        rest = w - keep
+        per_side[side][k] = (lt, keep, ("solid", "white"))
+        nxt = per_side[side][k + 1] if k + 1 < len(per_side[side]) else None
+        if nxt is not None and nxt[0] == "shoulder":
+            per_side[side][k + 1] = (nxt[0], np.asarray(nxt[1], float) + rest, nxt[2])
+        else:
+            per_side[side].insert(k + 1, ("shoulder", rest, None))
+    return per_side, offset
+
+
 def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = "",
                  details: Optional[dict] = None):
     xc = cfg.get("xodr") or {}
@@ -251,6 +290,18 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         ET.SubElement(ep, "elevation", s=_f(s0), a=_f(a), b=_f(b), c=_f(c), d=_f(dd))
     lp = ET.SubElement(r, "lateralProfile")
     sup = np.radians(at("bank_deg"))
+    # at a junction mouth the curb returns and gutters read as steep banking;
+    # hold the banking measured further back over the last few metres
+    mouth = float(xc.get("junction_mouth_m", 8.0))
+    for end in ("start", "end"):
+        if road.meta.get("junction_" + end) is None or len(knots) < 3:
+            continue
+        dist = knots if end == "start" else Lg - knots
+        near = dist < mouth
+        far = np.where(~near)[0]
+        if near.any() and len(far):
+            k_hold = far[0] if end == "start" else far[-1]
+            sup[near] = sup[k_hold]
     for (s0, a, b, c, dd) in linear(knots, sup):
         ET.SubElement(lp, "superelevation", s=_f(s0), a=_f(a), b=_f(b), c=_f(c), d=_f(dd))
 
@@ -285,6 +336,8 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         per_side, offset = _one_way(per_side, offset, det["one_way"])
         centre_mark = None
         n_l = len(per_side["l"])
+    per_side, offset = _tidy_lane_widths(per_side, offset, centre_mark, painted=bool(lm and nb >= 2),
+                                         target=lane_w, widest=float(rc.get("max_lane_width") or 4.0))
     lane_edits = det.get("lanes") or {}
     if np.max(np.abs(offset)) > 1e-3:
         for (s0, a, b, c_, dd) in linear(knots, offset):
@@ -442,6 +495,11 @@ def add_signal_structures(r, road: Road, geoms) -> int:
             bx, by, bz = g["base"]
             if bz is None:
                 bz = g["heads"][0].get("ground_z", 0.0)
+            # stand it beside the pole: the road point nearest the pole (the road's
+            # end may lie back from the corner where the junction was set back)
+            i = int(np.argmin(np.hypot(pts[:, 0] - bx, pts[:, 1] - by)))
+            h = float(hd[i])
+            n = np.array([-math.sin(h), math.cos(h)])
             t0 = float((np.array([bx, by]) - pts[i]) @ n)
             # CARLA turns its model by the road heading plus hOffset (it ignores
             # "orientation"); at hOffset 0 the arm points along -s (seen in
@@ -451,7 +509,7 @@ def add_signal_structures(r, road: Road, geoms) -> int:
             face = h + h_off
             top = max(q["top"] for q in g["heads"])
             wid = max(max(q["width"], 0.3) for q in g["heads"])
-            sg = ET.SubElement(sigs, "signal", s=_f(L if at_end else 0.0), t=_f(t0),
+            sg = ET.SubElement(sigs, "signal", s=_f(float(np.clip(s_pts[i], 0.0, L))), t=_f(t0),
                                id=str(road.id * 100 + 70 + k), name="traffic light",
                                dynamic="yes", orientation="+" if at_end else "-",
                                zOffset="0", country="OpenDRIVE", type="1000001", subtype="-1",
@@ -488,18 +546,19 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
     geo.text = ("+proj=tmerc +lat_0=%.10f +lon_0=%.10f +k=1 +x_0=0 +y_0=0 +ellps=WGS84 "
                 "+units=m +no_defs" % (origin_lla[0], origin_lla[1]))
     ET.SubElement(hdr, "userData", code="origin_altitude_m", value=_f(origin_lla[2]))
-    for road in roads:
-        road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""),
-                     details=road_details(cfg, edits, road.id))
-    jinfo = {"junctions": [], "connecting_roads": 0}
-    if junctions:
+    jinfo = _roads_and_junctions(root, roads, cfg, z_off, road_names, junctions, ground, edits)
+    if junctions and xc.get("set_back_for_turns", True):
+        # a turn that cannot be drawn as a car-sized curve between two lane ends
+        # (an acute corner) needs the junction to start further back on its roads
         from uga_terrain import junctions as junctions_mod
-        ends = {r.id: {"start": r.meta.get("junction_start"), "end": r.meta.get("junction_end")}
-                for r in roads}
-        jinfo = junctions_mod.add_to_xodr(root, junctions, ends, cfg,
-                                          next_id=max([r.id for r in roads] + [0]), ground=ground, z_off=z_off,
-                                          removed_turns=set((edits or {}).get("removed_turns") or []),
-                                          details=lambda rid: road_details(cfg, edits, rid))
+        need = junctions_mod.setbacks(root)
+        if need:
+            roads = [_trim(r, need.get((str(r.id), "start"), 0.0), need.get((str(r.id), "end"), 0.0))
+                     for r in roads]
+            for e in [e for e in root if e.tag in ("road", "junction")]:
+                root.remove(e)
+            jinfo = _roads_and_junctions(root, roads, cfg, z_off, road_names, junctions, ground, edits)
+            jinfo["set_back"] = {"%s:%s" % k: round(v, 1) for k, v in need.items()}
     # OpenDRIVE wants junctions after all roads
     for je in root.findall("junction"):
         root.remove(je)
@@ -512,4 +571,42 @@ def write_xodr(roads: Sequence[Road], origin_lla: Tuple[float, float, float], cf
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         f.write(xml + "\n")
     return {"roads": len(roads), "length_m": float(sum(r.length for r in roads)),
-            "junctions": jinfo["junctions"], "connecting_roads": jinfo["connecting_roads"]}
+            "junctions": jinfo["junctions"], "connecting_roads": jinfo["connecting_roads"],
+            "set_back": jinfo.get("set_back", {})}
+
+
+def _trim(road: Road, start: float, end: float, keep: float = 4.0) -> Road:
+    """The road without its first ``start`` and last ``end`` metres (at least
+    ``keep`` metres stay)."""
+    if start <= 0 and end <= 0:
+        return road
+    s = road.s
+    spare = max(road.length - keep, 0.0)
+    if start + end > spare and start + end > 0:
+        f = spare / (start + end)
+        start, end = start * f, end * f
+    m = (s >= s[0] + start) & (s <= s[-1] - end)
+    if m.sum() < 2:
+        return road
+    meta = dict(road.meta)
+    meta["trimmed_m"] = {"start": round(start, 2), "end": round(end, 2)}
+    return Road(road.id, road.source, s[m], road.x[m], road.y[m], road.heading[m],
+                {k: (v[m] if hasattr(v, "__len__") and len(v) == len(s) else v) for k, v in road.data.items()},
+                meta)
+
+
+def _roads_and_junctions(root, roads, cfg, z_off, road_names, junctions, ground, edits) -> dict:
+    for road in roads:
+        road_element(root, road, cfg, z_off, (road_names or {}).get(road.id, ""),
+                     details=road_details(cfg, edits, road.id))
+    jinfo = {"junctions": [], "connecting_roads": 0}
+    if junctions:
+        from uga_terrain import junctions as junctions_mod
+        ends = {r.id: {"start": r.meta.get("junction_start"), "end": r.meta.get("junction_end")}
+                for r in roads}
+        jinfo = junctions_mod.add_to_xodr(root, junctions, ends, cfg,
+                                          next_id=max([r.id for r in roads] + [0]), ground=ground, z_off=z_off,
+                                          removed_turns=set((edits or {}).get("removed_turns") or []),
+                                          details=lambda rid: road_details(cfg, edits, rid))
+    return jinfo
+

@@ -306,7 +306,8 @@ def _smoothstep(w):
 def _driven_reference(path, A, B, c0: float, c1: float):
     """Reference line (x, y, heading) of a connecting road that follows a
     driven path: the path is moved so it starts and ends exactly on the lane
-    centres of the two roads, then shifted sideways onto the reference line."""
+    centres of the two roads; returns the reference line and the lane centre
+    (see ``_lane_to_reference``)."""
     from uga_terrain.roads import resample_path
     P = np.asarray(path, float)
     h_out = B["h_in"] + math.pi
@@ -336,10 +337,169 @@ def _driven_reference(path, A, B, c0: float, c1: float):
     h = h_a + (h - h_a) * fade
     fade = np.clip((s[-1] - s) / 2.0, 0, 1)
     h = h_b + (h - h_b) * fade
+    x[0], y[0], x[-1], y[-1] = S0[0], S0[1], E0[0], E0[1]
+    return _lane_to_reference(x, y, h, A, B, c0, c1)
+
+
+def _lane_to_reference(x, y, h, A, B, c0: float, c1: float):
+    """Reference line of a connecting road from its lane-centre path: shifted
+    sideways by the lane's offset (easing from one road's to the other's), so
+    it starts and ends on the two roads' reference lines (as linked roads
+    must). For a right turn the reference lies outside the curve, so it cannot
+    fold; the lane keeps the shape of the lane-centre path."""
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    w = s / max(s[-1], 1e-9)
     c = c0 + (c1 - c0) * _smoothstep(w)
     rx, ry = x + c * np.sin(h), y - c * np.cos(h)
     rx[0], ry[0], rx[-1], ry[-1] = A["x"], A["y"], B["x"], B["y"]
-    return rx, ry, h
+    rh = np.unwrap(np.arctan2(np.gradient(ry), np.gradient(rx)))
+    rh[0] = A["h_in"] + 2 * math.pi * round((rh[0] - A["h_in"]) / (2 * math.pi))
+    h_out = B["h_in"] + math.pi
+    rh[-1] = h_out + 2 * math.pi * round((rh[-1] - h_out) / (2 * math.pi))
+    return rx, ry, rh, (x, y, h)
+
+
+MIN_TURN_RADIUS = 5.5      # m, tightest lane-centre curve written for a connecting road
+
+
+def _min_radius(geoms) -> float:
+    """Smallest radius (m) along paramPoly3 pieces."""
+    from uga_terrain.xodr import eval_param_poly3
+    P = eval_param_poly3(geoms, n_per=200)
+    d = np.hypot(*np.diff(P, axis=0).T)
+    keep = np.concatenate([[True], d > 1e-6])
+    P = P[keep]
+    if len(P) < 5:
+        return math.inf
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+    h = np.unwrap(np.arctan2(np.gradient(P[:, 1], s), np.gradient(P[:, 0], s)))
+    k = np.abs(np.gradient(h, s))
+    k = np.convolve(k, np.ones(5) / 5, mode="same")[2:-2]       # ~0.5 m: ignore sampling noise
+    return float(1.0 / max(k.max(), 1e-9)) if len(k) else math.inf
+
+
+def _path_radius(x, y) -> float:
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    if len(s) < 7 or s[-1] < 1e-6:
+        return math.inf
+    h = np.unwrap(np.arctan2(np.gradient(y, s), np.gradient(x, s)))
+    k = np.convolve(np.abs(np.gradient(h, s)), np.ones(5) / 5, mode="same")[2:-2]
+    return float(1.0 / max(k.max(), 1e-9))
+
+
+def _corner(p0, u0, p1, u1):
+    """Distances from p0 forward (along u0) and back from p1 (against u1) to
+    where the two lines cross: p0 + d0 u0 = p1 - d1 u1."""
+    M = np.array([u0, u1]).T
+    try:
+        d0, d1 = np.linalg.solve(M, np.asarray(p1, float) - np.asarray(p0, float))
+    except np.linalg.LinAlgError:
+        return None
+    return float(d0), float(d1)
+
+
+def setbacks(root: ET.Element, radius: float = MIN_TURN_RADIUS, most: float = 10.0) -> Dict[Tuple[str, str], float]:
+    """How far each leg road's junction end must move back so every turn's lane
+    centre fits an arc of ``radius`` (the lines of the two lanes must cross at
+    least radius * tan(turn / 2) from both lane ends). Keyed (road id,
+    "start"/"end"); only ends that need it, capped at ``most`` metres."""
+    from uga_terrain import xodr_check as X
+    _, roads, juncs = X.read_root(root)
+    by_id = {r.id: r for r in roads}
+    need: Dict[Tuple[str, str], float] = {}
+    for j in juncs:
+        for c in j.connections:
+            con = by_id.get(c["connecting"])
+            if con is None or not con.pred or not con.succ or not c["lanes"]:
+                continue
+            a, b = c["incoming"], con.succ["id"]
+            ca, cb = con.pred["contact"], con.succ["contact"]
+            if a not in by_id or b not in by_id:
+                continue
+            la = c["lanes"][0][0]
+            lb = con.sections[0].lanes.get(-1).succ if -1 in con.sections[0].lanes else None
+            A, B = _leg_end(by_id[a], ca), _leg_end(by_id[b], cb)
+            if la not in A["lanes"] or lb not in B["lanes"]:
+                continue
+            dir_a = 1.0 if ca == "end" else -1.0
+            dir_b = 1.0 if cb == "start" else -1.0
+            c0 = 0.5 * dir_a * (A["lanes"][la]["inner"] + A["lanes"][la]["outer"])
+            c1 = 0.5 * dir_b * (B["lanes"][lb]["inner"] + B["lanes"][lb]["outer"])
+            h0, h1 = A["h_in"], B["h_in"] + math.pi
+            th = abs(math.remainder(h1 - h0, 2 * math.pi))
+            if not math.radians(20) < th < math.radians(170):
+                continue
+            p0 = (A["x"] - c0 * math.sin(h0), A["y"] + c0 * math.cos(h0))
+            p1 = (B["x"] - c1 * math.sin(h1), B["y"] + c1 * math.cos(h1))
+            d = _corner(p0, np.array([math.cos(h0), math.sin(h0)]), p1, np.array([math.cos(h1), math.sin(h1)]))
+            if d is None:
+                continue
+            T = radius * math.tan(th / 2)
+            for key, dd in (((a, ca), d[0]), ((b, cb), d[1])):
+                if T - dd > 0.2:
+                    need[key] = min(max(need.get(key, 0.0), T - dd + 0.3), most)
+    return need
+
+
+def _fillet_path(p0, h0, p1, h1, step: float = 0.25):
+    """Straight, circular arc, straight from p0 (heading h0) to p1 (heading
+    h1): the widest arc that fits where the two lane lines cross. None when
+    they do not cross ahead of p0 and behind p1."""
+    u0 = np.array([math.cos(h0), math.sin(h0)])
+    u1 = np.array([math.cos(h1), math.sin(h1)])
+    th = math.remainder(h1 - h0, 2 * math.pi)
+    if not math.radians(5) < abs(th) < math.radians(175):
+        return None
+    d = _corner(p0, u0, p1, u1)
+    if d is None:
+        return None
+    d0, d1 = d
+    if d0 <= 0.05 or d1 <= 0.05:
+        return None
+    tan_h = math.tan(abs(th) / 2)
+    R = min(d0, d1) / tan_h
+    a0 = d0 - R * tan_h                         # straight before the arc
+    a1 = d1 - R * tan_h                         # straight after it
+    P0 = np.asarray(p0, float)
+    side = 1.0 if th > 0 else -1.0              # left turn: centre on the left
+    n0 = np.array([-u0[1], u0[0]]) * side
+    T0 = P0 + a0 * u0
+    C = T0 + R * n0
+    pts, hs = [], []
+    for d in np.arange(0.0, a0, step):
+        pts.append(P0 + d * u0); hs.append(h0)
+    arc = R * abs(th)
+    for d in np.arange(0.0, arc, step):
+        ang = h0 + side * d / R
+        pts.append(C - R * side * np.array([-math.sin(ang), math.cos(ang)])); hs.append(ang)
+    T1 = np.asarray(p1, float) - a1 * u1
+    for d in np.arange(0.0, a1, step):
+        pts.append(T1 + d * u1); hs.append(h0 + th)
+    pts.append(np.asarray(p1, float)); hs.append(h0 + th)
+    P = np.array(pts)
+    return (P[:, 0], P[:, 1], np.array(hs)), float(R)
+
+
+def _turn_curve(p0, h0, p1, h1):
+    """Lane-centre path (x, y, heading) between two lane centres: a Hermite
+    curve whose tangent length gives the widest tightest bend (the chord
+    length unless that bends more sharply). Returns (path, radius)."""
+    from uga_terrain.xodr import eval_param_poly3
+    best = None
+    chord = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    for f in (1.0, 0.9, 1.1, 0.8, 1.2, 0.7, 1.35, 0.6, 1.5, 0.5):
+        U, V, L = _hermite_xy(p0, h0, p1, h1, f * chord)
+        P = eval_param_poly3([(0.0, p0[0], p0[1], h0, L, U, V)], n_per=max(40, int(L * 4)))
+        r = _path_radius(P[:, 0], P[:, 1])
+        if best is None or r > best[1]:
+            best = (P, r)
+        if r >= MIN_TURN_RADIUS:
+            break
+    P = best[0]
+    h = np.unwrap(np.arctan2(np.gradient(P[:, 1]), np.gradient(P[:, 0])))
+    h[0] = h0 + 2 * math.pi * round((h[0] - h0) / (2 * math.pi))
+    h[-1] = h1 + 2 * math.pi * round((h[-1] - h1) / (2 * math.pi))
+    return (P[:, 0], P[:, 1], h), best[1]
 
 
 def _cubic(v0, d0, v1, d1, L):
@@ -375,8 +535,9 @@ def _leg_end(road, contact: str):
         # vehicles in right lanes (negative ids) drive along +s
         incoming = (lid < 0) == (contact == "end")
         lanes[lid] = {"inner": float(inner[0]), "outer": float(outer[0]), "incoming": incoming}
+    sup = float(X._eval(road.superelevation, np.array([s]))[0]) if road.superelevation else 0.0
     return {"x": float(row[1]), "y": float(row[2]), "h_in": h_in, "z": z, "slope_in": slope_in,
-            "lanes": lanes, "contact": contact}
+            "lanes": lanes, "contact": contact, "sup": sup}
 
 
 def _pick(inc: List[int], out: List[int], turn: str) -> List[Tuple[int, int]]:
@@ -489,16 +650,35 @@ def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int
                     # lane edges in the travel frame (right is negative)
                     in0, out0 = dir_a * LA["inner"], dir_a * LA["outer"]
                     in1, out1 = dir_b * LB["inner"], dir_b * LB["outer"]
-                    geoms = None
+                    # the lane's centre is drawn first (a smooth curve, no tighter than
+                    # MIN_TURN_RADIUS where the corner allows), then the reference line
+                    # is placed beside it: drawing the reference first and offsetting
+                    # the lane from it folds the lane over itself on a tight right turn
+                    from uga_terrain.xodr import fit_param_poly3
+                    c0, c1 = 0.5 * (in0 + out0), 0.5 * (in1 + out1)
+                    S0 = (A["x"] - c0 * math.sin(A["h_in"]), A["y"] + c0 * math.cos(A["h_in"]))
+                    E0 = (B["x"] - c1 * math.sin(h_out), B["y"] + c1 * math.cos(h_out))
+                    ref, r_min = None, 0.0
                     if path is not None and len(pairs) == 1:
-                        ref = _driven_reference(path, A, B, 0.5 * (in0 + out0), 0.5 * (in1 + out1))
+                        ref = _driven_reference(path, A, B, c0, c1)
                         if ref is not None:
-                            from uga_terrain.xodr import fit_param_poly3
-                            geoms = fit_param_poly3(ref[0], ref[1], ref[2], 8.0)
-                    if geoms is None:
-                        U, V, L = _hermite_xy((A["x"], A["y"]), A["h_in"], (B["x"], B["y"]), h_out)
-                        geoms = [(0.0, A["x"], A["y"], A["h_in"], L, U, V)]
+                            r_min = _path_radius(ref[3][0], ref[3][1])
+                    shape = "driven path" if ref is not None else ""
+                    if ref is None or r_min < MIN_TURN_RADIUS:
+                        for name_, cand in (("smooth curve", _turn_curve(S0, A["h_in"], E0, h_out)),
+                                            ("arc", _fillet_path(S0, A["h_in"], E0, h_out))):
+                            if cand is None:
+                                continue
+                            lane_path, r2 = cand
+                            if ref is None or r2 > r_min + 0.1:
+                                ref, r_min, shape = _lane_to_reference(*lane_path, A, B, c0, c1), r2, name_
+                    geoms = fit_param_poly3(ref[0], ref[1], ref[2], 3.0)
                     L = float(sum(g[4] for g in geoms))
+                    # banking: the two roads' own, in the direction of travel, so the
+                    # surface meets them without a step at the lane centre or edges
+                    sup_a = (1.0 if A["contact"] == "end" else -1.0) * A["sup"]
+                    sup_b = (1.0 if B["contact"] == "start" else -1.0) * B["sup"]
+
                     rid += 1
                     name = "%s turn %s lane %d to %s lane %d%s" % (
                         turn.capitalize() if turn != "straight" else "Straight", A["road"], la, B["road"], lb,
@@ -524,10 +704,11 @@ def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int
                         ET.SubElement(g, "paramPoly3", aU=_f(U[0]), bU=_f(U[1]), cU=_f(U[2]), dU=_f(U[3]),
                                       aV=_f(V[0]), bV=_f(V[1]), cV=_f(V[2]), dV=_f(V[3]), pRange="normalized")
                     ep = ET.SubElement(r, "elevationProfile")
-                    for (s0, a_, b_, c_, d_) in _elevation(geoms, 0.5 * (in0 + out0), 0.5 * (in1 + out1),
-                                                            A, B, ground, z_off):
+                    for (s0, a_, b_, c_, d_) in _elevation(geoms, c0, c1, A, B, ground, z_off):
                         ET.SubElement(ep, "elevation", s=_f(s0), a=_f(a_), b=_f(b_), c=_f(c_), d=_f(d_))
-                    ET.SubElement(r, "lateralProfile")
+                    lp = ET.SubElement(r, "lateralProfile")
+                    sp = _cubic(sup_a, 0.0, sup_b, 0.0, L)
+                    ET.SubElement(lp, "superelevation", s="0", a=_f(sp[0]), b=_f(sp[1]), c=_f(sp[2]), d=_f(sp[3]))
                     lanes = ET.SubElement(r, "lanes")
                     off = _cubic(in0, 0.0, in1, 0.0, L)
                     ET.SubElement(lanes, "laneOffset", s="0", a=_f(off[0]), b=_f(off[1]), c=_f(off[2]),
@@ -552,8 +733,7 @@ def add_to_xodr(root: ET.Element, juncs: Sequence[Junction], road_ends: Dict[int
                     ET.SubElement(con, "laneLink", **{"from": str(la), "to": "-1"})
                     rows.append({"from_road": A["road"], "from_lane": la, "to_road": B["road"], "to_lane": lb,
                                  "turn": turn, "driven": driven, "connecting_road": rid,
-                                 "length_m": round(L, 2), "shape": "driven path" if len(geoms) > 1 or (
-                                     path is not None and len(pairs) == 1) else "smooth curve"})
+                                 "length_m": round(L, 2), "min_radius_m": round(r_min, 1), "shape": shape})
         info["junctions"].append({"id": j.id, "legs": [st["road"] for st in legs], "connections": rows,
                                   "why": j.why})
         info["connecting_roads"] += n_con
