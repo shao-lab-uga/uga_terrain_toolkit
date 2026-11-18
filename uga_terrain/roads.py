@@ -162,7 +162,8 @@ def split_roads(paths: Sequence[tuple], cfg: dict) -> List[Road]:
         for a, b in zip(runs[::2], runs[1::2]):
             # a short piece is still a road when it leads into a junction
             # (the street continues past it, the recording just ends)
-            touches = (a == 0 and js is not None) or (b == len(s) and je is not None)
+            # (the whole piece, not a leftover beside a road already found)
+            touches = a == 0 and b == len(s) and (js is not None or je is not None)
             if b - a < 2 or (s[b - 1] - s[a]) < (min(min_len, 5.0) if touches else min_len):
                 continue
             sl = slice(a, b)

@@ -254,6 +254,60 @@ def _tidy_lane_widths(per_side: dict, offset, centre_mark, painted: bool, target
     return per_side, offset
 
 
+def _knot_median(v, k: int):
+    v = np.asarray(v, float)
+    if k <= 0 or len(v) < 3:
+        return v
+    p = np.pad(v, k, mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(p, 2 * k + 1), axis=1)
+
+
+def _smooth_knots(v, k: int):
+    """Median over 2k+1 knots, then a short moving average: a smooth edge."""
+    v = _knot_median(v, k)
+    if len(v) >= 3:
+        v = np.convolve(np.pad(v, 1, mode="edge"), np.ones(3) / 3.0, mode="valid")
+    return v
+
+
+def _steady_lanes(per_side: dict, offset, narrowest: float, widest: float, smooth_knots: int = 4,
+                  shoulder_max: float = 3.5):
+    """Driving lanes of constant width, as they are painted.
+
+    Each driving lane keeps its median measured width (between ``narrowest``
+    and ``widest``) all along the road; what the measured lane gains or loses
+    against that is passed outwards to the shoulder, which is smoothed. A
+    narrow outermost "driving lane" beside another driving lane (a parking
+    strip or gutter) becomes a shoulder. The lane offset (where the centre
+    line sits) is smoothed too, so lanes do not wobble."""
+    for side in ("l", "r"):
+        lst = per_side[side]
+        drv = [k for k, e in enumerate(lst) if e[0] == "driving"]
+        if len(drv) >= 2:
+            k = drv[-1]
+            lt, w, mark = lst[k]
+            if np.median(np.asarray(w, float)) < narrowest - 0.2:
+                lst[k] = ("shoulder", w, None)
+        carry = None
+        out = []
+        for lt, w, mark in lst:
+            w = np.asarray(w, float) + (0.0 if carry is None else carry)
+            if lt == "driving":
+                wc = float(np.clip(np.median(w), narrowest, widest))
+                carry = w - wc
+                out.append((lt, np.full(len(w), wc), mark))
+            elif lt == "shoulder" and carry is not None:
+                out.append((lt, np.clip(_smooth_knots(w, smooth_knots), 0.0, shoulder_max), mark))
+                carry = None
+            else:
+                out.append((lt, w, mark))
+                carry = None
+        if carry is not None and np.median(carry) > 0.3:
+            out.append(("shoulder", np.clip(_smooth_knots(carry, smooth_knots), 0.0, shoulder_max), None))
+        per_side[side] = out
+    return per_side, _smooth_knots(offset, 2)
+
+
 def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: str = "",
                  details: Optional[dict] = None):
     xc = cfg.get("xodr") or {}
@@ -338,6 +392,11 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         n_l = len(per_side["l"])
     per_side, offset = _tidy_lane_widths(per_side, offset, centre_mark, painted=bool(lm and nb >= 2),
                                          target=lane_w, widest=float(rc.get("max_lane_width") or 4.0))
+    if xc.get("steady_lanes", True):
+        per_side, offset = _steady_lanes(per_side, np.asarray(offset, float) * np.ones(len(knots)),
+                                         narrowest=float(rc.get("min_lane_width") or 2.75),
+                                         widest=float(rc.get("max_lane_width") or 4.0),
+                                         shoulder_max=float(xc.get("shoulder_max") or 3.5))
     lane_edits = det.get("lanes") or {}
     if np.max(np.abs(offset)) > 1e-3:
         for (s0, a, b, c_, dd) in linear(knots, offset):
@@ -359,6 +418,9 @@ def road_element(root, road: Road, cfg: dict, z_offset: float = 0.0, road_name: 
         curb = np.abs(at("curb_h_" + side))
         verge = at("verge_" + side)
         walk = at("walk_" + side)
+        if xc.get("steady_lanes", True):          # smooth outer edges too
+            verge = np.maximum(_smooth_knots(verge, 4), 0.0)
+            walk = np.maximum(_smooth_knots(walk, 4), 0.0)
         walk_h = np.nan_to_num(at("walk_h_" + side, 0.0))
         if _present(curb):
             lid += sign

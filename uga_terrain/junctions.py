@@ -147,6 +147,92 @@ def _crossings(paths: Sequence[tuple]) -> List[dict]:
     return out
 
 
+def split_turnarounds(drives: Sequence[Tuple[str, np.ndarray]], cfg: dict):
+    """Drives cut where the car turned around (a U-turn or a three-point turn):
+    the path there doubles back on itself, which would otherwise look like
+    junction turns and leave short tangled roads. The turnaround itself
+    (``turnaround_pad`` m either side of it) is dropped, so the street simply
+    ends there. Returns (drives, turnarounds [(x, y)])."""
+    jc = cfg.get("junctions") or {}
+    if jc.get("split_turnarounds", True) is False:
+        return list(drives), []
+    win = float(jc.get("turnaround_window") or 10.0)
+    pad = float(jc.get("turnaround_pad") or 12.0)
+    lim = math.radians(float(jc.get("turnaround_deg") or 140.0))
+    out, spots = [], []
+    for name, xy in drives:
+        xy = np.asarray(xy, float)
+        if len(xy) < 3:
+            out.append((name, xy))
+            continue
+        d = np.hypot(*np.diff(xy, axis=0).T)
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        n = len(xy)
+        ib = np.searchsorted(s, s - win, side="left")        # point ~win m back
+        ia = np.minimum(np.searchsorted(s, s + win, side="left"), n - 1)   # ~win m ahead
+        back = xy - xy[ib]
+        ahead = xy[ia] - xy
+        ok = (np.hypot(*back.T) > 0.6 * win) & (np.hypot(*ahead.T) > 0.6 * win)
+        ang = np.abs(_wrap(np.arctan2(ahead[:, 1], ahead[:, 0]) - np.arctan2(back[:, 1], back[:, 0])))
+        turn = ok & (ang > lim)
+        # also a cusp: the car stops and reverses (direction flips between neighbouring moves)
+        mv = np.diff(xy, axis=0)
+        big = np.hypot(*mv.T) > 0.05
+        for k in range(1, len(mv)):
+            if big[k] and big[k - 1]:
+                c = float(np.dot(mv[k], mv[k - 1]) / (np.hypot(*mv[k]) * np.hypot(*mv[k - 1])))
+                if c < -0.5:
+                    turn[k] = True
+        if not turn.any():
+            out.append((name, xy))
+            continue
+        drop = np.zeros(n, bool)
+        idx = np.flatnonzero(turn)
+        for k in idx:
+            drop |= np.abs(s - s[k]) <= pad
+        # where the turnarounds are, for the report and for side-street checks
+        edges = np.flatnonzero(np.diff(np.r_[0, drop.astype(int), 0]))
+        for a, b in zip(edges[::2], edges[1::2]):
+            seg = xy[a:b]
+            k = idx[(idx >= a) & (idx < b)]
+            c = xy[k].mean(0) if len(k) else seg.mean(0)
+            spots.append((float(c[0]), float(c[1])))
+        keep = np.flatnonzero(np.diff(np.r_[0, (~drop).astype(int), 0]))
+        for a, b in zip(keep[::2], keep[1::2]):
+            if b - a >= 2:
+                out.append((name, xy[a:b]))
+    return out, spots
+
+
+def merge_overlapping(juncs: Sequence[Junction], cfg: dict) -> List[Junction]:
+    """Junctions whose areas overlap are one junction (a turn and the opening
+    of the same crossing found a few metres apart). Ids are renumbered."""
+    jc = cfg.get("junctions") or {}
+    r_max = float(jc.get("max_radius") or 25.0)
+    js = [Junction(j.id, j.x, j.y, j.r, list(j.why)) for j in juncs]
+    changed = True
+    while changed:
+        changed = False
+        for a in range(len(js)):
+            for b in range(a + 1, len(js)):
+                A, B = js[a], js[b]
+                d = math.hypot(A.x - B.x, A.y - B.y)
+                if d < A.r + B.r:
+                    w = A.r / (A.r + B.r)
+                    x, y = w * A.x + (1 - w) * B.x, w * A.y + (1 - w) * B.y
+                    r = max(math.hypot(A.x - x, A.y - y) + 0.6 * A.r, math.hypot(B.x - x, B.y - y) + 0.6 * B.r,
+                            A.r, B.r)
+                    js[a] = Junction(A.id, x, y, float(min(r, r_max)), sorted(set(A.why) | set(B.why)))
+                    del js[b]
+                    changed = True
+                    break
+            if changed:
+                break
+    for k, j in enumerate(js):
+        j.id = 1000 + k
+    return js
+
+
 def find(drives: Sequence[Tuple[str, np.ndarray]], cfg: dict) -> List[Junction]:
     """drives: [(name, xy (N,2))] -> junctions."""
     jc = cfg.get("junctions") or {}
@@ -192,6 +278,10 @@ def openings(roads, known: Sequence[Junction], cfg: dict) -> List[Junction]:
         return []
     jump = float(jc.get("opening_m") or 2.5)
     min_len = float(jc.get("opening_min_len") or 6.0)
+    max_len = float(jc.get("opening_max_len") or 40.0)
+    depth = float(jc.get("opening_depth_m") or 6.0)
+    end_gap = float(jc.get("opening_end_gap") or 15.0)
+    near = float(jc.get("opening_junction_gap") or 20.0)
     r_min, r_max = float(jc.get("min_radius") or 8.0), float(jc.get("max_radius") or 25.0)
     out: List[Junction] = []
     next_id = 1000 + len(known)
@@ -206,8 +296,17 @@ def openings(roads, known: Sequence[Junction], cfg: dict) -> List[Junction]:
             base = float(np.nanpercentile(w, 25))
             op = np.nan_to_num(w, nan=0.0) > base + jump
             edges = np.flatnonzero(np.diff(np.r_[0, op.astype(int), 0]))
+            # a street needs a junction at the road end to come that close to it;
+            # where the recording just stops or turned around, the edge there is not a street
+            g0 = 3.0 if r.meta.get("junction_start") is not None else end_gap
+            g1 = 3.0 if r.meta.get("junction_end") is not None else end_gap
+            wf = np.nan_to_num(w, nan=0.0)
             for a, b in zip(edges[::2], edges[1::2]):
-                if r.s[b - 1] - r.s[a] >= min_len and r.s[a] > 3.0 and r.s[b - 1] < r.length - 3.0:
+                ln = r.s[b - 1] - r.s[a]
+                # a cross street's paved surface reaches far out; a parking bay,
+                # bus stop or driveway apron only a few metres, often over a long stretch
+                if (min_len <= ln <= max_len and r.s[a] > g0 and r.s[b - 1] < r.length - g1
+                        and float(wf[a:b].max()) >= base + depth):
                     stretches.append([float(r.s[a]), float(r.s[b - 1]), key])
         stretches.sort()
         merged = []
@@ -221,7 +320,8 @@ def openings(roads, known: Sequence[Junction], cfg: dict) -> List[Junction]:
             sm = 0.5 * (s0 + s1)
             i = int(np.argmin(np.abs(r.s - sm)))
             x, y = float(r.x[i]), float(r.y[i])
-            if any(math.hypot(x - j.x, y - j.y) < j.r + 5.0 for j in list(known) + out):
+            # near a junction the road edge flares out into its own curb returns
+            if any(math.hypot(x - j.x, y - j.y) < j.r + near for j in list(known) + out):
                 continue
             rad = float(np.clip(0.5 * (s1 - s0) + 2.0, r_min, r_max))
             what = {"road_l": "left", "road_r": "right", "both": "both sides"}[side]

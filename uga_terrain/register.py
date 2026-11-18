@@ -285,12 +285,38 @@ def poses_of(project, i: int, align: Optional[Dict[str, dict]] = None) -> Option
     when align.json is current for that recording's scan."""
     fz = project.cache(i) / "frames.npz"
     if not fz.is_file():
-        return None
+        d = frames_from_csv(project, i)          # imported map without its scan cache
+        return None if d is None else d["T"]
     T = np.load(fz)["T"]
     a = (align if align is not None else load(project)).get(str(i))
     if a and a.get("applied") and a.get("stamp") == _stamp(fz):
         T = np.asarray(a["C"], float)[None] @ T
     return T
+
+
+def frames_from_csv(project, i: int) -> Optional[Dict[str, np.ndarray]]:
+    """Times, final poses and GNSS positions of recording i from the map's own
+    trajectory.csv (written by every export). Lets a map imported without its
+    scan cache still redo roads and export."""
+    import csv
+    from pathlib import Path
+    from uga_terrain import geo
+    f = project.out / "trajectory.csv"
+    if not f.is_file():
+        return None
+    name = Path(project.recordings[i]).name
+    rows = [r for r in csv.DictReader(open(f, newline="")) if r["recording"] == name]
+    if len(rows) < 2:
+        return None
+    rows.sort(key=lambda r: int(r["frame"]))
+    g = lambda k: np.array([float(r[k]) for r in rows])
+    n = len(rows)
+    T = np.tile(np.eye(4), (n, 1, 1))
+    T[:, :3, :3] = geo.rpy_to_mat(*np.radians([g("roll_deg"), g("pitch_deg"), g("yaw_deg")]))
+    T[:, 0, 3], T[:, 1, 3], T[:, 2, 3] = g("x"), g("y"), g("z")
+    G = np.tile(np.eye(4), (n, 1, 1))
+    G[:, 0, 3], G[:, 1, 3], G[:, 2, 3] = g("gnss_x"), g("gnss_y"), g("gnss_z")
+    return {"t": g("t"), "T": T, "G": G}
 
 
 def summary_text(name: str, rec: dict) -> str:

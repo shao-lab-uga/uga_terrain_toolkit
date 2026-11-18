@@ -84,6 +84,12 @@ def write(project, path: Path) -> int:
     return len(arr)
 
 
+def count(path: Path) -> int:
+    with open(path, "rb") as f:
+        head = f.read(4096).split(b"end_header", 1)[0].decode(errors="replace")
+    return int([ln for ln in head.splitlines() if ln.startswith("element vertex")][0].split()[-1])
+
+
 def read(path: Path, max_points: int = 0) -> np.ndarray:
     raw = Path(path).read_bytes()
     end = raw.index(b"end_header\n") + len(b"end_header\n")

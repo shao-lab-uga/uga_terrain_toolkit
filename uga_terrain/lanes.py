@@ -184,6 +184,40 @@ def _smooth_edge(v: np.ndarray, fallback: float, step: float) -> np.ndarray:
     return _gauss1d(v, 5.0 / step)
 
 
+def _near_finite(ok: np.ndarray, k: int) -> np.ndarray:
+    """True within k stations of a True."""
+    if k <= 0:
+        return ok.copy()
+    c = np.convolve(ok.astype(float), np.ones(2 * k + 1), mode="same")
+    return c > 0
+
+
+def centre_from_drives(passes, step: float = 1.0):
+    """Where the centre line runs (t per station), from drives in both
+    directions: right-hand traffic keeps a drive along the road on the right
+    of it and a drive against the road on its left. Half-way between them
+    where both were driven; elsewhere half the usual gap from the one drive.
+    None when no stretch was driven both ways."""
+    if not passes or passes.get("opp") is None:
+        return None
+    own = np.asarray(passes["own"], float)
+    opp = np.asarray(passes["opp"], float)
+    both = np.isfinite(own) & np.isfinite(opp)
+    gap = opp - own
+    good = both & (gap >= 2.0) & (gap <= 9.0)
+    if good.sum() < max(10, 0.15 * len(own)):
+        return None
+    half = 0.5 * float(np.median(gap[good]))
+    tgt = np.where(good, 0.5 * (own + opp),
+                   np.where(np.isfinite(own), own + half, np.where(np.isfinite(opp), opp - half, np.nan)))
+    ok = np.isfinite(tgt)
+    if ok.sum() < 2:
+        return None
+    idx = np.arange(len(tgt))
+    tgt = np.interp(idx, idx[ok], tgt[ok])
+    return _gauss1d(tgt, 10.0 / step)
+
+
 def layout(road: Road, lines: List[dict], cfg: dict) -> dict:
     """Lane boundaries (t at each station, left positive) and lane types."""
     rc = cfg.get("roads") or {}
@@ -209,11 +243,35 @@ def layout(road: Road, lines: List[dict], cfg: dict) -> dict:
                 keep[-1] = f
             continue
         keep.append(f)
+    # the road reaches at least past where the car drove (a noisy scan can
+    # put an edge inside the lane)
+    ps = (road.meta or {}).get("passes_t") or {}
+    for key, sign in (("own", -1.0), ("opp", 1.0), ):
+        v = ps.get(key)
+        if v is None:
+            continue
+        v = np.asarray(v, float)
+        if np.isfinite(v).sum() >= 2:
+            idx = np.arange(len(v))
+            ok = np.isfinite(v)
+            reach = _gauss1d(np.interp(idx, idx[ok], v[ok]), 5.0 / step)
+            reach = np.where(_near_finite(ok, int(10 / step)), reach, np.nan)
+            if sign > 0:
+                e_l = np.where(np.isfinite(reach), np.maximum(e_l, reach + 1.5), e_l)
+            else:
+                e_r = np.where(np.isfinite(reach), np.minimum(e_r, reach - 1.5), e_r)
     total = float(np.median(e_l - e_r))
+    # where the drives went each way: the centre line lies between a pass
+    # along the road (right-hand traffic: on its right) and one against it
+    target = centre_from_drives((road.meta or {}).get("passes_t"), step)
+    if keep and target is not None:
+        near = [float(np.median(np.abs(t - target))) for _, t, _ in keep]
+        if min(near) > 1.2:
+            keep = []                      # no painted line between the two directions
     if keep:
         # the centre line divides the directions: the painted line nearest the
         # middle of the paved width
-        mid = 0.5 * (e_l + e_r)
+        mid = 0.5 * (e_l + e_r) if target is None else target
         c = int(np.argmin([abs(np.median(t - mid)) for _, t, _ in keep]))
         bounds = [e_r] + [t for _, t, _ in keep] + [e_l]
         centre = c + 1
@@ -223,12 +281,15 @@ def layout(road: Road, lines: List[dict], cfg: dict) -> dict:
         # no paint: two directions, equal lanes of about lane_width, steady widths
         n = max(1, int(round(total / 2 / lane_w)))
         mid = _gauss1d(0.5 * (e_l + e_r), 10.0 / step)
+        if target is not None:
+            mid = np.clip(target, e_r + 1.5, e_l - 1.5)
+            source = "drives"
         half_l = e_l - mid
         half_r = mid - e_r
         bounds = [e_r + half_r * k / n for k in range(n)] + [mid] + [mid + half_l * k / n for k in range(1, n + 1)]
         centre = n
         marks = ["edge"] + ["broken"] * (n - 1) + ["solid"] + ["broken"] * (n - 1) + ["edge"]
-        source = "width"
+        source = "drives" if target is not None else "width"
     # lane types: wide strips are driving lanes, narrow ones shoulders
     types = []
     for k in range(len(bounds) - 1):

@@ -80,8 +80,18 @@ def surface(grid, x: float, y: float, cfg: dict, radius: float = 60.0) -> Option
     Z = grid.sample(X, Y, "z")
     R = grid.sample(X, Y, "roughness")
     S = grid.sample(X, Y, "slope_deg")
+    # some maps are rougher overall (coarse asphalt, or passes that do not
+    # line up exactly): judge the surface against the junction's own middle
+    mid = (X - x) ** 2 + (Y - y) ** 2 < 8.0 ** 2
+    rm = R[mid & np.isfinite(R)]
+    if len(rm) > 20:
+        rough_max = max(rough_max, 1.3 * float(np.median(rm)))
+    slope_max = 8.0                                    # on a hill the street itself is steeper
+    sm = S[mid & np.isfinite(S)]
+    if len(sm) > 20:
+        slope_max = max(slope_max, float(np.median(sm)) + 4.0)
     with np.errstate(invalid="ignore"):
-        paved = np.isfinite(Z) & (R < rough_max) & (S < 8.0)
+        paved = np.isfinite(Z) & (R < rough_max) & (S < slope_max)
     k1 = 1                                             # one cell: close cracks, never a curb
     m = ~_disk_or(~_disk_or(paved, k1), k1)
     k2 = int(round(float(jc.get("surface_open_m") or 1.5) / CELL))

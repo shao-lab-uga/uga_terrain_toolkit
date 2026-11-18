@@ -515,6 +515,9 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
         name = "%d:%s" % (i, Path(rec).name)
         paths.append((name, T[:, :2, 3]))
         frames[name] = T
+    paths, turnarounds = junctions_mod.split_turnarounds(paths, cfg)
+    for x_, y_ in turnarounds:
+        progress.note("The car turned around near (%.0f, %.0f); the street ends there in the map." % (x_, y_))
     progress.set("find roads", 0, 1, "%d drives" % len(paths))
     juncs = junctions_mod.find(paths, cfg)
 
@@ -530,6 +533,7 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
                 idx[a:a + 512] = np.argmin(((P[:, None, :] - xy[None, :, :]) ** 2).sum(-1), 1)
             rpy = geo.mat_to_rpy(T[idx, :3, :3])
             roads_mod.analyse_road(r, grid, cfg, vehicle_rpy=(rpy[:, 0], rpy[:, 1]))
+    juncs = junctions_mod.merge_overlapping(juncs, cfg)
     for attempt in range(2):
         pieces, passes = junctions_mod.cut(paths, juncs)
         found = roads_mod.split_roads(pieces, cfg)
@@ -539,7 +543,7 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
         new = junctions_mod.openings(found, juncs, cfg) if attempt == 0 else []
         if not new:
             break
-        juncs = juncs + new
+        juncs = junctions_mod.merge_overlapping(juncs + new, cfg)
     if juncs and (cfg.get("junctions") or {}).get("fit_to_curbs", True):
         # the junction's edge follows the curbs, and streets nobody drove into get a short road
         progress.set("find roads", 0, 1, "fitting junctions to the curbs")
@@ -550,6 +554,16 @@ def step_roads(project: Project, cfg: dict, progress: Progress, grid: Optional[T
                 jn.outline, jn.legs = res["outline"], res["legs"]
                 ol = np.asarray(jn.outline)
                 jn.r = float(np.max(np.hypot(ol[:, 0] - jn.x, ol[:, 1] - jn.y)))
+        # a "junction" where only two streets meet (and no side street was
+        # found) is a bend: the road simply carries on through it
+        bends = [jn for jn in juncs if jn.outline and len(jn.legs) < 3]
+        for jn in bends:
+            progress.note("Junction %d (%s) has only %d streets; treated as a bend in the road." % (
+                jn.id, ", ".join(jn.why), len(jn.legs)))
+        if bends:
+            juncs = [jn for jn in juncs if jn not in bends]
+            for k, jn in enumerate(juncs):
+                jn.id = 1000 + k
         pieces, passes = junctions_mod.cut(paths, juncs)
         found = roads_mod.split_roads(pieces, cfg)
         analyse(found)
@@ -794,6 +808,7 @@ def _street_lanes(project: Project, found, juncs, frames: dict, cfg: dict, progr
                             g = np.load(fp)
                             if g.shape[1] >= 4:
                                 yield T[k], g
+            street.meta["passes_t"] = _passes_across(street, frames)
             progress.set("find lanes", 0, 1, "street through junction %d: roads %d and %d" % (jn.id, A.id, B.id))
             try:
                 lay = lanes.detect(street, scans, cfg, blank=[(s[na - 1] + 0.5, s[na + n_gap] - 0.5)])
@@ -818,7 +833,8 @@ def _street_lanes(project: Project, found, juncs, frames: dict, cfg: dict, progr
             n_drive = sum(t == "driving" for t in lay["types"])
             progress.note("Roads %d and %d are one street through junction %d: %d driving lane(s), %s." % (
                 A.id, B.id, jn.id, n_drive, "from %d painted line(s)" % len(lay["lines"])
-                if lay["source"] == "paint" else "no lane paint found, so the width is split evenly"))
+                if lay["source"] == "paint" else "centre line between the drives each way"
+                if lay["source"] == "drives" else "no lane paint found, so the width is split evenly"))
 
 
 def _scans_near(project: Project, frames: dict, P: np.ndarray, cfg: dict):
@@ -847,6 +863,38 @@ def load_junctions(project: Project):
     return [junctions_mod.Junction.from_json(d) for d in json.loads(f.read_text())]
 
 
+def _passes_across(road, frames: dict, reach: float = 9.0) -> dict:
+    """Where the drives ran across the road, per station: the sideways
+    position (left positive) of poses heading along the road ("own") and
+    against it ("opp"); NaN where no drive went that way."""
+    n = len(road.s)
+    if n < 3:
+        return {}
+    P = np.stack([road.x, road.y], 1)
+    sums = {"own": np.zeros(n), "opp": np.zeros(n)}
+    cnt = {"own": np.zeros(n), "opp": np.zeros(n)}
+    for T in frames.values():
+        xy = T[:, :2, 3]
+        yaw = np.arctan2(T[:, 1, 0], T[:, 0, 0])
+        for a in range(0, len(xy), 512):
+            Q = xy[a:a + 512]
+            k = np.argmin(((Q[:, None, :] - P[None, :, :]) ** 2).sum(-1), 1)
+            h = road.heading[k]
+            dx, dy = Q[:, 0] - P[k, 0], Q[:, 1] - P[k, 1]
+            t = -dx * np.sin(h) + dy * np.cos(h)
+            along = dx * np.cos(h) + dy * np.sin(h)
+            ok = (np.abs(t) < reach) & (np.abs(along) < 1.5) & (k > 0) & (k < n - 1)
+            dh = np.abs((yaw[a:a + 512] - h + np.pi) % (2 * np.pi) - np.pi)
+            for key, m in (("own", ok & (dh < np.radians(30))), ("opp", ok & (dh > np.radians(150)))):
+                np.add.at(sums[key], k[m], t[m])
+                np.add.at(cnt[key], k[m], 1.0)
+    out = {}
+    for key in ("own", "opp"):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[key] = np.where(cnt[key] > 0, sums[key] / np.maximum(cnt[key], 1), np.nan)
+    return out
+
+
 def _detect_lanes(project: Project, road, frames: dict, cfg: dict, progress: Progress) -> None:
     """Lane lines from lidar intensity, using every drive that saw the road;
     the lane model goes into road.data (boundaries lb0..lbN) and road.meta["lanes"]."""
@@ -870,11 +918,14 @@ def _detect_lanes(project: Project, road, frames: dict, cfg: dict, progress: Pro
                     g = np.load(f)
                     if g.shape[1] >= 4:
                         yield T[k], g
+    road.meta["passes_t"] = _passes_across(road, frames)
     try:
         lay = lanes.detect(road, scans, cfg)
     except Exception as e:  # keep the build going with evenly split lanes
         progress.note("Road %d: lane detection failed (%s); lanes are split evenly." % (road.id, e))
         return
+    finally:
+        road.meta.pop("passes_t", None)
     for k in [k for k in road.data if k.startswith("lb")]:
         del road.data[k]
     for k, b in enumerate(lay.pop("bounds")):
@@ -883,6 +934,7 @@ def _detect_lanes(project: Project, road, frames: dict, cfg: dict, progress: Pro
     n_drive = sum(t == "driving" for t in lay["types"])
     progress.note("Road %d: %d driving lane(s), %s." % (
         road.id, n_drive, "from %d painted line(s)" % len(lay["lines"]) if lay["source"] == "paint"
+        else "centre line between the drives each way" if lay["source"] == "drives"
         else "no lane paint found, so the width is split evenly"))
 
 
@@ -916,7 +968,11 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     names = project.road_names()
     progress.set("export", 0, 5, "lidar point cloud and signal poles")
     from uga_terrain import lidar_map
-    n_lidar = lidar_map.write(project, out / "lidar.ply")
+    have_cache = all((project.cache(i) / "frames.npz").is_file() for i in range(len(project.recordings)))
+    if have_cache or not (out / "lidar.ply").is_file():
+        n_lidar = lidar_map.write(project, out / "lidar.ply")
+    else:                              # imported without the scan cache: keep the cloud it came with
+        n_lidar = lidar_map.count(out / "lidar.ply")
     find_signals(project, cfg, progress=progress)
     xinfo = write_xodr(project, cfg, grid, found)
     progress.set("export", 1, 5, "road profile CSV")
@@ -924,10 +980,13 @@ def step_export(project: Project, cfg: dict, progress: Progress,
     rows = []
     for i, rec in enumerate(project.recordings):
         fz = project.cache(i) / "frames.npz"
-        if not fz.is_file():
-            continue
-        d = dict(np.load(fz))
-        d["T"] = register.poses_of(project, i)
+        if fz.is_file():
+            d = dict(np.load(fz))
+            d["T"] = register.poses_of(project, i)
+        else:
+            d = register.frames_from_csv(project, i)   # imported without the scan cache
+            if d is None:
+                continue
         rpy = np.degrees(geo.mat_to_rpy(d["T"][:, :3, :3]))
         for k in range(len(d["t"])):
             rows.append({"recording": Path(rec).name, "frame": k, "t": "%.6f" % d["t"][k],
